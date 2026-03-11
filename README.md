@@ -95,11 +95,7 @@ Once GitHub Actions finishes building (~5 minutes), go to the printed link, down
 ```
 cryptoscanner/
 ├── crypto_scanner.py        # Main application
-├── requirements.txt         # Python dependencies
-├── push_release.sh          # Release helper script
-└── .github/
-    └── workflows/
-        └── build.yml        # GitHub Actions build workflow
+└── requirements.txt         # Python dependencies
 ```
 
 ---
