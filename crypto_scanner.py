@@ -1019,7 +1019,51 @@ STRONG_SELL_BG = "#2a0010"
 BUY_BG         = "#001a10"
 SELL_BG        = "#1a000a"
 
-MONO  = "JetBrains Mono,Fira Code,Consolas,monospace"
+# ── Cross-platform monospace font stack ──────────────────────────────────────
+# Arch Linux built-in:  DejaVu Sans Mono, Liberation Mono
+# Windows built-in:     Cascadia Code (Win11), Consolas (Vista+), Courier New
+# macOS built-in:       SF Mono (10.12+), Menlo (10.6+), Monaco
+# Common dev install:   JetBrains Mono, Fira Code, Hack, Source Code Pro
+# Final fallback:       "monospace" Qt/CSS generic hint (always resolves)
+MONO_FAMILIES = [
+    # Preferred — popular dev fonts, available on all platforms if installed
+    "JetBrains Mono", "Fira Code", "Fira Mono", "Cascadia Code", "Cascadia Mono",
+    "Source Code Pro", "Hack", "Iosevka", "Inconsolata",
+    # Linux guaranteed
+    "Ubuntu Mono", "DejaVu Sans Mono", "Liberation Mono", "Noto Mono",
+    # macOS guaranteed
+    "SF Mono", "Menlo", "Monaco", "Andale Mono",
+    # Windows guaranteed
+    "Consolas", "Lucida Console", "Courier New",
+    # Generic Qt hint — must be last, always resolves to something monospaced
+    "monospace",
+]
+
+# For Qt stylesheets (font-family CSS property)
+MONO_CSS = (
+    "'JetBrains Mono','Fira Code','Fira Mono','Cascadia Code','Cascadia Mono',"
+    "'Source Code Pro','Hack','Ubuntu Mono','DejaVu Sans Mono','Liberation Mono',"
+    "'Noto Mono','SF Mono','Menlo','Monaco','Consolas','Lucida Console',"
+    "'Courier New',monospace"
+)
+
+# Single name used where Qt API needs one string (setFamilies handles the rest)
+MONO = "JetBrains Mono"
+
+def mono_font(size=10, bold=False):
+    """
+    Return a QFont using the full cross-platform monospace fallback chain.
+    Qt walks MONO_FAMILIES in order and uses the first one found on the system.
+    StyleHint.Monospace + setFixedPitch(True) ensure a fixed-width font is
+    always selected even if none of the named families are installed.
+    """
+    f = QFont()
+    f.setFamilies(MONO_FAMILIES)
+    f.setPointSize(size)
+    f.setBold(bold)
+    f.setStyleHint(QFont.StyleHint.Monospace)
+    f.setFixedPitch(True)
+    return f
 SANS  = "Inter,Segoe UI,SF Pro Display,sans-serif"
 
 FONT_SIZE = 13   # default — user can change in Config tab
@@ -1071,7 +1115,7 @@ QTableWidget {{
     gridline-color: {BORDER};
     border: 1px solid {BORDER};
     border-radius: 6px;
-    font-family: {MONO};
+    font-family: {MONO_CSS};
     font-size: {fs_s}px;
     selection-background-color: #1a3a5c;
     selection-color: {WHITE};
@@ -1166,7 +1210,7 @@ QLabel#titleLabel {{
     font-size: {fs_h}px;
     font-weight: 800;
     letter-spacing: 2px;
-    font-family: {MONO};
+    font-family: {MONO_CSS};
 }}
 QLabel#subtitleLabel {{
     color: {DIM};
@@ -1210,7 +1254,7 @@ QDoubleSpinBox, QSpinBox, QComboBox, QLineEdit {{
     border: 1px solid {BORDER};
     border-radius: 4px;
     padding: 5px 10px;
-    font-family: {MONO};
+    font-family: {MONO_CSS};
     font-size: {fs_s}px;
     min-width: 80px;
 }}
@@ -1303,7 +1347,7 @@ class SignalBadge(QLabel):
                 padding: 3px 8px;
                 font-weight: {bold};
                 font-size: 11px;
-                font-family: {MONO};
+                font-family: {MONO_CSS};
                 letter-spacing: 0.5px;
             }}
         """)
@@ -1383,7 +1427,7 @@ class StatCard(QFrame):
         lbl.setStyleSheet(f"color:{DIM}; font-size:10px; font-weight:700; letter-spacing:1px;")
 
         self.val_lbl = QLabel(value)
-        self.val_lbl.setStyleSheet(f"color:{color}; font-size:18px; font-weight:800; font-family:{MONO};")
+        self.val_lbl.setStyleSheet(f"color:{color}; font-size:18px; font-weight:800; font-family:{MONO_CSS};")
 
         lay.addWidget(lbl)
         lay.addWidget(self.val_lbl)
@@ -1392,7 +1436,7 @@ class StatCard(QFrame):
         self.val_lbl.setText(value)
         if color:
             self.val_lbl.setStyleSheet(
-                f"color:{color}; font-size:18px; font-weight:800; font-family:{MONO};")
+                f"color:{color}; font-size:18px; font-weight:800; font-family:{MONO_CSS};")
 
 # ─────────────────────────────────────────────────────────────
 #  PRICE CHART — pure QPainter candlestick chart, no QtCharts
@@ -1430,7 +1474,7 @@ class PriceChart(QWidget):
 
         # Grid lines + Y labels
         p.setPen(QPen(QColor(BORDER), 1, Qt.PenStyle.DotLine))
-        p.setFont(QFont(MONO, 8))
+        p.setFont(mono_font(8))
         p.setPen(QColor(DIM))
         for frac in [0.0, 0.25, 0.5, 0.75, 1.0]:
             price = hi - frac * rng
@@ -1516,10 +1560,10 @@ class DetailPanel(QScrollArea):
         hlay = QHBoxLayout(hdr)
 
         sym_lbl = QLabel(sym)
-        sym_lbl.setStyleSheet(f"color:{ACCENT}; font-size:22px; font-weight:800; font-family:{MONO};")
+        sym_lbl.setStyleSheet(f"color:{ACCENT}; font-size:22px; font-weight:800; font-family:{MONO_CSS};")
 
         price_lbl = QLabel(f"${price:.6f}")
-        price_lbl.setStyleSheet(f"color:{WHITE}; font-size:18px; font-weight:700; font-family:{MONO};")
+        price_lbl.setStyleSheet(f"color:{WHITE}; font-size:18px; font-weight:700; font-family:{MONO_CSS};")
 
         chg_lbl = QLabel(f"{chg:+.2f}%")
         chg_lbl.setStyleSheet(f"color:{chg_c}; font-size:16px; font-weight:700;")
@@ -1594,7 +1638,7 @@ class DetailPanel(QScrollArea):
             lbl = QLabel(label)
             lbl.setStyleSheet(f"color:{DIM}; font-size:11px;")
             val = QLabel(val_text)
-            val.setStyleSheet(f"color:{col}; font-family:{MONO}; font-size:12px; font-weight:700;")
+            val.setStyleSheet(f"color:{col}; font-family:{MONO_CSS}; font-size:12px; font-weight:700;")
             ind_lay.addWidget(lbl, row, 0)
             ind_lay.addWidget(widget, row, 1)
             ind_lay.addWidget(val, row, 2)
@@ -1617,7 +1661,7 @@ class DetailPanel(QScrollArea):
         conf_txt = "  ✓ Fresh" if (mh > 0 and rising) or (mh < 0 and not rising) else "  ⚠ Stale"
         conf_col = GREEN if "Fresh" in conf_txt else YELLOW
         macd_val = QLabel(f"{mh:+.8f}  {macd_dir}{conf_txt}")
-        macd_val.setStyleSheet(f"color:{GREEN if mh > 0 else RED}; font-family:{MONO}; font-size:12px; font-weight:700;")
+        macd_val.setStyleSheet(f"color:{GREEN if mh > 0 else RED}; font-family:{MONO_CSS}; font-size:12px; font-weight:700;")
         ind_lay.addWidget(macd_lbl, 3, 0)
         ind_lay.addWidget(macd_val, 3, 1, 1, 2)
         self.lay.addWidget(ind_grp)
@@ -3297,11 +3341,11 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         rlay.setSpacing(12)
 
         time_lbl = QLabel(alert["time"])
-        time_lbl.setStyleSheet(f"color:{DIM}; font-size:11px; font-family:{MONO};")
+        time_lbl.setStyleSheet(f"color:{DIM}; font-size:11px; font-family:{MONO_CSS};")
         time_lbl.setMinimumWidth(54)
 
         sym_lbl = QLabel(alert["symbol"])
-        sym_lbl.setStyleSheet(f"color:{ACCENT}; font-family:{MONO}; font-weight:700; font-size:13px;")
+        sym_lbl.setStyleSheet(f"color:{ACCENT}; font-family:{MONO_CSS}; font-weight:700; font-size:13px;")
         sym_lbl.setMinimumWidth(80)
 
         sig_lbl = QLabel(sig)
@@ -3314,7 +3358,7 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         detail_lbl.setStyleSheet(f"color:{DIM}; font-size:11px;")
 
         price_lbl = QLabel(f"${alert['price']:.5f}")
-        price_lbl.setStyleSheet(f"color:{WHITE}; font-family:{MONO}; font-size:12px;")
+        price_lbl.setStyleSheet(f"color:{WHITE}; font-family:{MONO_CSS}; font-size:12px;")
         price_lbl.setMinimumWidth(80)
         price_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
@@ -3713,7 +3757,7 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         rr = self.cfg_tp.value() / self.cfg_sl.value()
         col = GREEN if rr >= 1.5 else YELLOW if rr >= 1 else RED
         self.rr_lbl.setText(f"{rr:.2f}x")
-        self.rr_lbl.setStyleSheet(f"color:{col}; font-family:{MONO}; font-weight:800; font-size:14px;")
+        self.rr_lbl.setStyleSheet(f"color:{col}; font-family:{MONO_CSS}; font-weight:800; font-size:14px;")
 
     def _update_filter_label(self):
         pass
@@ -3850,6 +3894,18 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
             self._settings.remove(f"col_{i}")
         self._reflow_columns()
         self.statusBar().showMessage("Column widths reset to auto")
+
+    def keyPressEvent(self, event):
+        key  = event.key()
+        mods = event.modifiers()
+        # Close on Q or Ctrl+Q — but NOT on Escape
+        if key == Qt.Key.Key_Q and (mods == Qt.KeyboardModifier.NoModifier or
+                                     mods == Qt.KeyboardModifier.ControlModifier):
+            self.close()
+        elif key == Qt.Key.Key_Escape:
+            event.ignore()   # swallow Escape — do nothing
+        else:
+            super().keyPressEvent(event)
 
     def closeEvent(self, event):
         self._alert_engine.stop()
@@ -4251,19 +4307,20 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
                 def txt(x, y, text, color, pt=10, bold=False, mono=False,
                         align=Qt.AlignmentFlag.AlignLeft|Qt.AlignmentFlag.AlignTop,
                         w=None, h=18):
-                    f = QFont(MONO if mono else "sans-serif")
-                    f.setPointSize(pt); f.setBold(bold)
+                    f = mono_font(pt, bold) if mono else QFont()
+                    if not mono:
+                        f.setPointSize(pt); f.setBold(bold)
                     p.setFont(f)
                     p.setPen(QColor(color))
                     draw_w = (w if w is not None else W - x - 4)
-                    # Elide text if too wide
                     fm = p.fontMetrics()
                     elided = fm.elidedText(text, Qt.TextElideMode.ElideRight, draw_w)
                     p.drawText(x, y, draw_w, h, align, elided)
 
                 def txt_w(text, pt=10, bold=False, mono=False):
-                    f = QFont(MONO if mono else "sans-serif")
-                    f.setPointSize(pt); f.setBold(bold)
+                    f = mono_font(pt, bold) if mono else QFont()
+                    if not mono:
+                        f.setPointSize(pt); f.setBold(bold)
                     p.setFont(f)
                     return p.fontMetrics().horizontalAdvance(text)
 
@@ -4273,7 +4330,7 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
                 y1 = 12
 
                 # Pre-measure everything in row 1
-                f_sym = QFont(MONO); f_sym.setPointSize(14); f_sym.setBold(True)
+                f_sym = mono_font(14, bold=True)
                 p.setFont(f_sym)
                 sym_w = p.fontMetrics().horizontalAdvance(sym)
 
@@ -4296,39 +4353,46 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
                 exp_x   = pot_x + pot_w
                 chg_x   = W - chg_w - 8
 
-                # Draw symbol — clipped to exactly sym_w so badge never overlaps
+                # Row 1 — draw everything using rect form so baseline is consistent
+                ROW_H = 22   # height of row 1 text area
+                ry = 6       # top of row 1 rect
+
+                # Symbol
                 p.setFont(f_sym)
                 p.setPen(QColor(ACCENT))
-                p.setClipRect(L, y1 - 14, sym_w + 4, 20)
-                p.drawText(L, y1, sym)
-                p.setClipping(False)
+                p.drawText(L, ry, sym_w + 2, ROW_H,
+                           Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, sym)
 
-                # Signal badge
+                # Signal badge — vertically centred in row
                 bg_c, fg_c = badge_colors.get(sig, ("#1a2235","#4a5568"))
                 p.setBrush(QBrush(QColor(bg_c))); p.setPen(QPen(QColor(fg_c), 1))
-                p.drawRoundedRect(badge_x, y1 - 13, bw, bh, 3, 3)
+                p.drawRoundedRect(badge_x, ry + 2, bw, bh - 4, 3, 3)
                 p.setFont(f_b); p.setPen(QColor(fg_c))
-                p.drawText(badge_x, y1 - 13, bw, bh, Qt.AlignmentFlag.AlignCenter, btext)
+                p.drawText(badge_x, ry + 2, bw, bh - 4,
+                           Qt.AlignmentFlag.AlignCenter, btext)
 
                 # Pot%
                 pot_col = "#00ff88" if pot >= 70 else (YELLOW if pot >= 40 else DIM)
                 p.setFont(f_med); p.setPen(QColor(pot_col))
-                p.drawText(pot_x, y1, pot_str)
+                p.drawText(pot_x, ry, pot_w, ROW_H,
+                           Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, pot_str)
 
                 # Exp%
                 exp_col = GREEN if exp >= 3 else DIM
                 p.setPen(QColor(exp_col))
-                p.drawText(exp_x, y1, exp_str)
+                p.drawText(exp_x, ry, exp_w, ROW_H,
+                           Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, exp_str)
 
                 # 24h% right-aligned
                 chg_col = GREEN if chg24 >= 0 else RED
                 p.setPen(QColor(chg_col))
-                p.drawText(chg_x, y1, chg_str)
+                p.drawText(W - chg_w - 8, ry, chg_w, ROW_H,
+                           Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, chg_str)
 
                 # ════════════════════════════════════════════
                 # ROW 2  — Score bar | RSI bar | BB bar | 1H | Conf | Age
                 # ════════════════════════════════════════════
-                y2 = y1 + 24
+                y2 = ry + ROW_H + 4
                 bar_h = 6
                 bar_r = 3
 
@@ -4407,7 +4471,7 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
                 for plbl, pval, pcol in pill_items:
                     f_lbl = QFont(); f_lbl.setPointSize(7); p.setFont(f_lbl)
                     lw = p.fontMetrics().horizontalAdvance(plbl)
-                    f_val = QFont(MONO); f_val.setPointSize(9); f_val.setBold(True); p.setFont(f_val)
+                    f_val = mono_font(9, bold=True); p.setFont(f_val)
                     vw = p.fontMetrics().horizontalAdvance(pval)
                     pw = max(lw, vw) + 14
                     if px + pw > W - 8:
@@ -4511,10 +4575,10 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
 
         sym = r["symbol"].replace("USDT", "/USDT")
         sym_lbl = QLabel(sym)
-        sym_lbl.setStyleSheet(f"color:{ACCENT}; font-size:18px; font-weight:900; font-family:{MONO};")
+        sym_lbl.setStyleSheet(f"color:{ACCENT}; font-size:18px; font-weight:900; font-family:{MONO_CSS};")
 
         price_lbl = QLabel(f"${r['price']:.6f}")
-        price_lbl.setStyleSheet(f"color:{WHITE}; font-size:15px; font-weight:700; font-family:{MONO};")
+        price_lbl.setStyleSheet(f"color:{WHITE}; font-size:15px; font-weight:700; font-family:{MONO_CSS};")
 
         chg   = r["change_24h"]
         chg_c = GREEN if chg >= 0 else RED
