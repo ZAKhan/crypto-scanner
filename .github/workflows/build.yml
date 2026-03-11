@@ -1,0 +1,41 @@
+name: Build Binaries
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            output: crypto_scanner
+          - os: windows-latest
+            output: crypto_scanner.exe
+          - os: macos-latest
+            output: crypto_scanner
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install pyinstaller PyQt6 python-binance requests
+
+      - name: Build binary
+        run: pyinstaller --onefile --windowed --name crypto_scanner crypto_scanner.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CryptoScanner-${{ matrix.os }}
+          path: dist/${{ matrix.output }}
