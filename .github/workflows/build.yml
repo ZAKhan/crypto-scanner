@@ -31,13 +31,45 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install pyinstaller PyQt6 python-binance requests
+        run: pip install pyinstaller PyQt6 requests
 
       - name: Build binary
         run: pyinstaller --onefile --windowed --name crypto_scanner crypto_scanner.py
+
+      - name: Rename binary for platform
+        shell: bash
+        run: |
+          mkdir -p release_files
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            cp dist/crypto_scanner.exe release_files/crypto_scanner_windows.exe
+          elif [ "${{ matrix.os }}" = "macos-latest" ]; then
+            cp dist/crypto_scanner release_files/crypto_scanner_macos
+          else
+            cp dist/crypto_scanner release_files/crypto_scanner_linux
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: CryptoScanner-${{ matrix.os }}
-          path: dist/${{ matrix.output }}
+          path: release_files/
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: false
+          name: Crypto Scanner ${{ github.ref_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
