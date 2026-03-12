@@ -1,0 +1,9 @@
+binary/
+push_release.sh
+dist/
+build/
+*.spec
+*.odt
+*.pdf
+*.html
+screenshots/
