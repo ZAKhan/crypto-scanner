@@ -20,7 +20,6 @@ import time
 import subprocess
 import statistics
 import threading
-import webbrowser
 import requests
 from datetime import datetime
 
@@ -34,12 +33,12 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import (
     Qt, QTimer, QThread, pyqtSignal, QSize, QPropertyAnimation,
-    QEasingCurve, pyqtProperty, QObject, QSettings, QByteArray
+    QEasingCurve, pyqtProperty, QObject, QSettings, QByteArray, QUrl
 )
 from PyQt6.QtGui import (
     QFont, QColor, QPalette, QBrush, QLinearGradient,
     QPainter, QPen, QIcon, QAction, QFontDatabase,
-    QShortcut, QKeySequence
+    QShortcut, QKeySequence, QDesktopServices
 )
 try:
     from PyQt6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
@@ -2274,7 +2273,7 @@ class CryptoScannerWindow(QMainWindow):
         elif action == detail_act:
             self._show_detail_popup(r)
         elif action == binance_act:
-            webbrowser.open(f"https://www.binance.com/en/trade/{sym}_USDT?type=spot")
+            QDesktopServices.openUrl(QUrl(f"https://www.binance.com/en/trade/{sym}_USDT?type=spot"))
 
     # ── Context menu on TRADES table ────────────────────────
     def _trades_context_menu(self, pos):
@@ -2331,7 +2330,7 @@ class CryptoScannerWindow(QMainWindow):
             self._save_trades()
             self._refresh_trades_table()
         elif action == binance_act2:
-            webbrowser.open(f"https://www.binance.com/en/trade/{sym}_USDT?type=spot")
+            QDesktopServices.openUrl(QUrl(f"https://www.binance.com/en/trade/{sym}_USDT?type=spot"))
 
     # ── Record trade from scanner right-click ───────────────
     def _record_trade(self, r, side):
