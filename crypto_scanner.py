@@ -46,6 +46,8 @@ try:
 except ImportError:
     HAS_CHARTS = False
 
+APP_VERSION = "v1.3.1"
+
 # ─────────────────────────────────────────────────────────
 #  CONFIG  (edit these to change scan behaviour)
 # ─────────────────────────────────────────────────────────
@@ -1216,6 +1218,15 @@ QLabel#subtitleLabel {{
     font-size: {fs_x}px;
     letter-spacing: 1px;
 }}
+QLabel#versionLabel {{
+    color: {DARK};
+    background: {ACCENT};
+    font-size: {fs_x}px;
+    font-weight: 800;
+    font-family: {MONO_CSS};
+    border-radius: 4px;
+    padding: 1px 7px;
+}}
 
 QFrame#cardFrame {{
     background: {CARD};
@@ -1869,7 +1880,7 @@ class _EquityCanvas(QWidget):
 class CryptoScannerWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Crypto Scalper Scanner — Binance")
+        self.setWindowTitle(f"Crypto Scalper Scanner {APP_VERSION} — Binance")
         self.setMinimumSize(1280, 760)
         self._scanner  = Scanner()
         self._worker   = None
@@ -1916,6 +1927,10 @@ class CryptoScannerWindow(QMainWindow):
         title = QLabel("◈ CRYPTO SCALPER")
         title.setObjectName("titleLabel")
 
+        ver = QLabel(APP_VERSION)
+        ver.setObjectName("versionLabel")
+        ver.setToolTip("Application version")
+
         sub = QLabel(f"Binance Spot  ·  Price < $1  ·  Vol > $1M  ·  5m")
         sub.setObjectName("subtitleLabel")
 
@@ -1938,6 +1953,7 @@ class CryptoScannerWindow(QMainWindow):
         self._update_filter_label()
 
         tlay.addWidget(title)
+        tlay.addWidget(ver)
         tlay.addWidget(sub)
         tlay.addStretch()
         tlay.addWidget(self.status_lbl)
@@ -2273,7 +2289,12 @@ class CryptoScannerWindow(QMainWindow):
         elif action == detail_act:
             self._show_detail_popup(r)
         elif action == binance_act:
-            QDesktopServices.openUrl(QUrl(f"https://www.binance.com/en/trade/{sym}_USDT?type=spot"))
+            url = f"https://www.binance.com/en/trade/{sym}_USDT?type=spot"
+            try:
+                subprocess.Popen(["xdg-open", url],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                QDesktopServices.openUrl(QUrl(url))
 
     # ── Context menu on TRADES table ────────────────────────
     def _trades_context_menu(self, pos):
@@ -2330,7 +2351,12 @@ class CryptoScannerWindow(QMainWindow):
             self._save_trades()
             self._refresh_trades_table()
         elif action == binance_act2:
-            QDesktopServices.openUrl(QUrl(f"https://www.binance.com/en/trade/{sym}_USDT?type=spot"))
+            url = f"https://www.binance.com/en/trade/{sym}_USDT?type=spot"
+            try:
+                subprocess.Popen(["xdg-open", url],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                QDesktopServices.openUrl(QUrl(url))
 
     # ── Record trade from scanner right-click ───────────────
     def _record_trade(self, r, side):
