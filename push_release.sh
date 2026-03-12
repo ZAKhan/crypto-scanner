@@ -4,7 +4,8 @@
 #  Usage: ./push_release.sh
 # ═══════════════════════════════════════════════════════════
 
-REPO_DIR="/home/zulfiqar/apps/cryptoscanner"
+# Always run from the directory the script lives in
+REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 GREEN="\033[92m"
 YELLOW="\033[93m"
@@ -14,27 +15,25 @@ BOLD="\033[1m"
 RESET="\033[0m"
 
 cd "$REPO_DIR" || { echo -e "${RED}ERROR: Cannot access $REPO_DIR${RESET}"; exit 1; }
+echo -e "${CYAN}Repo: $REPO_DIR${RESET}"
 
-# ── Files that are always included ──────────────────────────
+# ── Files always included ────────────────────────────────────
 CORE_FILES=(
-    crypto_scanner_v9.py
-    build.sh
+    crypto_scanner.py
     push_release.sh
-    crypto_scanner.desktop
+    requirements.txt
 )
 
-# ── Docs — only staged if they exist and were modified ──────
+# ── Docs — staged only if modified ──────────────────────────
 DOC_FILES=(
-    README.html
     README.md
+    tutorial.html
     crypto_scanner_guide.pdf
     crypto_scanner_guide.odt
-    ANALYSIS.md
-    PICOCLAW_WHATSAPP_SETUP.md
 )
 
-# ── Ask for version ─────────────────────────────────────────
-read -p "Enter version number (e.g. 9.2): " VERSION
+# ── Ask for version ──────────────────────────────────────────
+read -p "Enter version number (e.g. 1.3.2): " VERSION
 TAG="v$VERSION"
 
 if git tag | grep -q "^$TAG$"; then
@@ -54,16 +53,16 @@ for f in "${CORE_FILES[@]}"; do
         git add "$f"
         echo -e "  ${GREEN}+${RESET} $f"
     else
-        echo -e "  ${YELLOW}?${RESET} $f  (not found — skipped)"
+        echo -e "  ${RED}✗${RESET} $f  (NOT FOUND)"
     fi
 done
 
-# ── Stage doc files only if modified ─────────────────────────
+# ── Stage docs only if modified ──────────────────────────────
 echo ""
 echo -e "${BOLD}Staging modified docs:${RESET}"
 for f in "${DOC_FILES[@]}"; do
     if [[ -f "$f" ]]; then
-        git add "$f"
+        git add -f "$f" 2>/dev/null
         STATUS=$(git diff --cached --name-only | grep -c "^$f$" || true)
         if [[ "$STATUS" -gt 0 ]]; then
             echo -e "  ${GREEN}+${RESET} $f  (modified)"
@@ -76,7 +75,7 @@ for f in "${DOC_FILES[@]}"; do
     fi
 done
 
-# ── Show what will be committed ──────────────────────────────
+# ── Show staged files ────────────────────────────────────────
 echo ""
 echo -e "${BOLD}Files in this commit:${RESET}"
 git diff --cached --name-only | while read -r f; do
@@ -106,7 +105,7 @@ git tag "$TAG"
 git push origin "$TAG"
 
 echo ""
-echo -e "${GREEN}${BOLD}Done!${RESET} GitHub Actions is now building binaries for ${CYAN}$TAG${RESET}."
+echo -e "${GREEN}${BOLD}Done!${RESET} Released ${CYAN}$TAG${RESET}."
 echo ""
 echo -e "  Build progress : https://github.com/ZAKhan/crypto-scanner/actions"
 echo -e "  Create release : https://github.com/ZAKhan/crypto-scanner/releases/new?tag=$TAG"

@@ -33,12 +33,12 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import (
     Qt, QTimer, QThread, pyqtSignal, QSize, QPropertyAnimation,
-    QEasingCurve, pyqtProperty, QObject, QSettings, QByteArray, QUrl
+    QEasingCurve, pyqtProperty, QObject, QSettings, QByteArray
 )
 from PyQt6.QtGui import (
     QFont, QColor, QPalette, QBrush, QLinearGradient,
     QPainter, QPen, QIcon, QAction, QFontDatabase,
-    QShortcut, QKeySequence, QDesktopServices
+    QShortcut, QKeySequence
 )
 try:
     from PyQt6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
@@ -46,7 +46,7 @@ try:
 except ImportError:
     HAS_CHARTS = False
 
-APP_VERSION = "v1.3.1"
+APP_VERSION = "v1.3.3"
 
 # ─────────────────────────────────────────────────────────
 #  CONFIG  (edit these to change scan behaviour)
@@ -69,6 +69,63 @@ CFG = {
 # ─────────────────────────────────────────────────────────
 #  COLOUR PAIRS
 # ─────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────
+#  URL OPENER  — works in source, PyInstaller binary, Wayland, X11
+# ─────────────────────────────────────────────────────────
+def open_url(url: str) -> None:
+    """
+    Open a URL in the system browser. Tries multiple methods in order
+    so it works correctly when running as a PyInstaller binary on any
+    desktop (Wayland, X11, Ubuntu, Arch).
+    """
+    import shutil, os
+
+    # 1. xdg-open with explicit env so DISPLAY/WAYLAND_DISPLAY are passed through
+    xdg = shutil.which("xdg-open")
+    if xdg:
+        env = os.environ.copy()
+        try:
+            proc = subprocess.Popen(
+                [xdg, url], env=env,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            proc.wait(timeout=3)
+            if proc.returncode == 0:
+                return
+        except Exception:
+            pass
+
+    # 2. Qt native handler
+    try:
+        from PyQt6.QtGui import QDesktopServices
+        from PyQt6.QtCore import QUrl
+        if QDesktopServices.openUrl(QUrl(url)):
+            return
+    except Exception:
+        pass
+
+    # 3. Common browser binaries directly
+    for browser in ("firefox", "chromium", "chromium-browser",
+                    "google-chrome", "brave-browser"):
+        b = shutil.which(browser)
+        if b:
+            try:
+                subprocess.Popen(
+                    [b, url],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                return
+            except Exception:
+                continue
+
+    # 4. Python webbrowser as last resort
+    try:
+        import webbrowser
+        webbrowser.open(url)
+    except Exception:
+        pass
+
 
 # ─────────────────────────────────────────────────────────
 #  BINANCE API
@@ -2289,12 +2346,7 @@ class CryptoScannerWindow(QMainWindow):
         elif action == detail_act:
             self._show_detail_popup(r)
         elif action == binance_act:
-            url = f"https://www.binance.com/en/trade/{sym}_USDT?type=spot"
-            try:
-                subprocess.Popen(["xdg-open", url],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except Exception:
-                QDesktopServices.openUrl(QUrl(url))
+            open_url(f"https://www.binance.com/en/trade/{sym}_USDT?type=spot")
 
     # ── Context menu on TRADES table ────────────────────────
     def _trades_context_menu(self, pos):
@@ -2351,12 +2403,7 @@ class CryptoScannerWindow(QMainWindow):
             self._save_trades()
             self._refresh_trades_table()
         elif action == binance_act2:
-            url = f"https://www.binance.com/en/trade/{sym}_USDT?type=spot"
-            try:
-                subprocess.Popen(["xdg-open", url],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except Exception:
-                QDesktopServices.openUrl(QUrl(url))
+            open_url(f"https://www.binance.com/en/trade/{sym}_USDT?type=spot")
 
     # ── Record trade from scanner right-click ───────────────
     def _record_trade(self, r, side):
