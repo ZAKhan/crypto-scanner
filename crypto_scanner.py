@@ -46,7 +46,7 @@ try:
 except ImportError:
     HAS_CHARTS = False
 
-APP_VERSION = "2.0.2"
+APP_VERSION = "2.1.0"
 
 # ─────────────────────────────────────────────────────────
 #  CONFIG  (edit these to change scan behaviour)
@@ -1105,6 +1105,81 @@ def _init_sounds():
 
 _init_sounds()   # Run once when module loads
 
+
+
+SAFETY_CFG = {
+    "signal_persistence":       True,
+    "btc_trend_check":          True,
+    "btc_drop_pct":             2.0,
+    "max_open_trades":          True,
+    "max_open_trades_count":    3,
+    "daily_loss_limit":         True,
+    "daily_loss_amount":        100.0,
+    "coin_trend_check":         True,
+    "coin_drop_pct":            5.0,
+}
+_daily_loss_tracker = {"date": "", "loss": 0.0}
+
+
+def check_trade_safety(r, trades, balance_usdt=0.0):
+    """
+    Run all enabled safety checks before placing a trade.
+    Returns (allowed: bool, reason: str)
+    """
+    sym    = r.get("symbol", "")
+    signal = r.get("signal", "")
+
+    # Layer 5 — Signal persistence (must hold 2+ scans)
+    if SAFETY_CFG["signal_persistence"]:
+        conf = r.get("signal_conf", 1)
+        if conf < 2:
+            return False, f"Signal not confirmed yet ({conf}/2 scans)"
+
+    # Layer 2 — BTC market condition
+    if SAFETY_CFG["btc_trend_check"] and sym != "BTCUSDT":
+        try:
+            import requests as _req
+            r2 = _req.get(CFG["base_url"] + "/api/v3/ticker/24hr",
+                          params={"symbol": "BTCUSDT"}, timeout=5).json()
+            btc_chg = float(r2.get("priceChangePercent", 0))
+            if btc_chg < -SAFETY_CFG["btc_drop_pct"]:
+                return False, f"BTC dropping {btc_chg:.1f}% — market falling"
+        except Exception:
+            pass  # don't block on network error
+
+    # Layer 2 — Coin 24h trend
+    if SAFETY_CFG["coin_trend_check"]:
+        chg_24h = r.get("change", 0)
+        if chg_24h < -SAFETY_CFG["coin_drop_pct"]:
+            return False, f"{sym} down {chg_24h:.1f}% in 24h — downtrend"
+
+    # Layer 3 — Max open trades
+    if SAFETY_CFG["max_open_trades"]:
+        open_count = sum(1 for t in trades if t.get("status") == "OPEN")
+        if open_count >= SAFETY_CFG["max_open_trades_count"]:
+            return False, f"Max open trades reached ({open_count}/{SAFETY_CFG['max_open_trades_count']})"
+
+    # Layer 3 — Daily loss limit
+    if SAFETY_CFG["daily_loss_limit"]:
+        from datetime import datetime as _dt
+        today = _dt.now().strftime("%Y-%m-%d")
+        if _daily_loss_tracker["date"] != today:
+            _daily_loss_tracker["date"] = today
+            _daily_loss_tracker["loss"] = 0.0
+        if _daily_loss_tracker["loss"] >= SAFETY_CFG["daily_loss_amount"]:
+            return False, f"Daily loss limit reached (${_daily_loss_tracker['loss']:.2f})"
+
+    return True, ""
+
+def record_trade_loss(pnl: float):
+    """Call after a trade closes at a loss to update daily tracker."""
+    if pnl < 0:
+        from datetime import datetime as _dt
+        today = _dt.now().strftime("%Y-%m-%d")
+        if _daily_loss_tracker["date"] != today:
+            _daily_loss_tracker["date"] = today
+            _daily_loss_tracker["loss"] = 0.0
+        _daily_loss_tracker["loss"] += abs(pnl)
 
 class AlertEngine(QObject):
     """
@@ -3214,6 +3289,19 @@ class CryptoScannerWindow(QMainWindow):
             prog_lbl_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
             prog_lbl_text.setStyleSheet(f"color:{ACCENT}; font-size:12px;")
 
+            # Trade safety checks
+            safety_ok, safety_reason = check_trade_safety(r, self._trades)
+            if not safety_ok:
+                reply = QMessageBox.warning(
+                    self, "Trade Safety Check Failed",
+                    f"Safety filter blocked this trade:\n\n{safety_reason}\n\n"
+                    f"Override and trade anyway?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+
             sym_ok, sym_info = _trader.get_symbol_info(symbol)
             if not sym_ok:
                 env = "testnet" if TRADING_CFG["testnet"] else "live Binance"
@@ -3496,6 +3584,7 @@ class CryptoScannerWindow(QMainWindow):
             else:
                 pnl = (entry - ep) * exec_qty
                 pct = (entry - ep) / entry * 100
+            record_trade_loss(pnl)  # update daily loss tracker
 
         trade["exit"]         = round(ep, 8)
         trade["pnl"]          = round(pnl, 8)
@@ -4867,6 +4956,89 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         rlay.addWidget(self.rr_lbl, len(risk_rows), 1)
         lay.addWidget(risk_grp)
 
+        # ── TRADE SAFETY ─────────────────────────────────
+        safety_grp = QGroupBox("TRADE SAFETY")
+        slay = _cfg_grid(safety_grp)
+
+        def _safety_row(row, label, cfg_key, spin_widget=None, spin_cfg_key=None):
+            """Add a checkbox row with optional spinbox."""
+            cb = QCheckBox(label)
+            cb.setChecked(SAFETY_CFG[cfg_key])
+            cb.setStyleSheet(f"color:{WHITE};")
+            slay.addWidget(cb, row, 0, 1, 2 if spin_widget is None else 1)
+            if spin_widget is not None:
+                spin_widget.setEnabled(SAFETY_CFG[cfg_key])
+                spin_widget.setFixedWidth(100)
+                slay.addWidget(spin_widget, row, 1, Qt.AlignmentFlag.AlignLeft)
+                cb.toggled.connect(spin_widget.setEnabled)
+            return cb
+
+        self.sf_persistence  = QCheckBox("Signal must hold 2+ consecutive scans")
+        self.sf_persistence.setChecked(SAFETY_CFG["signal_persistence"])
+        self.sf_persistence.setStyleSheet(f"color:{WHITE};")
+        self.sf_persistence.setToolTip("Eliminates false signals that appear for only one scan")
+
+        self.sf_btc_check    = QCheckBox("Skip if BTC dropping >")
+        self.sf_btc_check.setChecked(SAFETY_CFG["btc_trend_check"])
+        self.sf_btc_check.setStyleSheet(f"color:{WHITE};")
+        self.sf_btc_drop     = QDoubleSpinBox()
+        self.sf_btc_drop.setRange(0.5, 10); self.sf_btc_drop.setValue(SAFETY_CFG["btc_drop_pct"])
+        self.sf_btc_drop.setSuffix("%"); self.sf_btc_drop.setFixedWidth(100)
+        self.sf_btc_drop.setEnabled(SAFETY_CFG["btc_trend_check"])
+        self.sf_btc_check.toggled.connect(self.sf_btc_drop.setEnabled)
+
+        self.sf_coin_check   = QCheckBox("Skip if coin down >")
+        self.sf_coin_check.setChecked(SAFETY_CFG["coin_trend_check"])
+        self.sf_coin_check.setStyleSheet(f"color:{WHITE};")
+        self.sf_coin_drop    = QDoubleSpinBox()
+        self.sf_coin_drop.setRange(1, 20); self.sf_coin_drop.setValue(SAFETY_CFG["coin_drop_pct"])
+        self.sf_coin_drop.setSuffix("% in 24h"); self.sf_coin_drop.setFixedWidth(120)
+        self.sf_coin_drop.setEnabled(SAFETY_CFG["coin_trend_check"])
+        self.sf_coin_check.toggled.connect(self.sf_coin_drop.setEnabled)
+
+        self.sf_max_trades   = QCheckBox("Max open trades")
+        self.sf_max_trades.setChecked(SAFETY_CFG["max_open_trades"])
+        self.sf_max_trades.setStyleSheet(f"color:{WHITE};")
+        self.sf_max_trades_n = QSpinBox()
+        self.sf_max_trades_n.setRange(1, 20); self.sf_max_trades_n.setValue(SAFETY_CFG["max_open_trades_count"])
+        self.sf_max_trades_n.setFixedWidth(100)
+        self.sf_max_trades_n.setEnabled(SAFETY_CFG["max_open_trades"])
+        self.sf_max_trades.toggled.connect(self.sf_max_trades_n.setEnabled)
+
+        self.sf_daily_loss   = QCheckBox("Daily loss limit  $")
+        self.sf_daily_loss.setChecked(SAFETY_CFG["daily_loss_limit"])
+        self.sf_daily_loss.setStyleSheet(f"color:{WHITE};")
+        self.sf_daily_loss_n = QDoubleSpinBox()
+        self.sf_daily_loss_n.setRange(10, 10000); self.sf_daily_loss_n.setValue(SAFETY_CFG["daily_loss_amount"])
+        self.sf_daily_loss_n.setPrefix("$"); self.sf_daily_loss_n.setFixedWidth(100)
+        self.sf_daily_loss_n.setEnabled(SAFETY_CFG["daily_loss_limit"])
+        self.sf_daily_loss.toggled.connect(self.sf_daily_loss_n.setEnabled)
+
+        # Daily loss tracker reset button
+        self.sf_reset_btn = QPushButton("Reset Daily Loss")
+        self.sf_reset_btn.setFixedWidth(140)
+        self.sf_reset_btn.setStyleSheet(
+            f"background:{CARD}; color:{DIM}; border:1px solid {BORDER}; "
+            f"border-radius:4px; padding:2px 8px; font-size:11px;")
+        def _reset_daily():
+            _daily_loss_tracker["loss"] = 0.0
+            _daily_loss_tracker["date"] = ""
+            self.statusBar().showMessage("Daily loss counter reset")
+        self.sf_reset_btn.clicked.connect(_reset_daily)
+
+        slay.addWidget(self.sf_persistence,  0, 0, 1, 2)
+        slay.addWidget(self.sf_btc_check,    1, 0)
+        slay.addWidget(self.sf_btc_drop,     1, 1, Qt.AlignmentFlag.AlignLeft)
+        slay.addWidget(self.sf_coin_check,   2, 0)
+        slay.addWidget(self.sf_coin_drop,    2, 1, Qt.AlignmentFlag.AlignLeft)
+        slay.addWidget(self.sf_max_trades,   3, 0)
+        slay.addWidget(self.sf_max_trades_n, 3, 1, Qt.AlignmentFlag.AlignLeft)
+        slay.addWidget(self.sf_daily_loss,   4, 0)
+        slay.addWidget(self.sf_daily_loss_n, 4, 1, Qt.AlignmentFlag.AlignLeft)
+        slay.addWidget(self.sf_reset_btn,    5, 0, 1, 2)
+
+        lay.addWidget(safety_grp)
+
         ui_grp = QGroupBox("UI APPEARANCE")
         ulay   = _cfg_grid(ui_grp)
 
@@ -5192,6 +5364,18 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
     def _update_filter_label(self):
         pass
 
+    def _apply_safety_config(self):
+        """Read safety UI widgets into SAFETY_CFG."""
+        SAFETY_CFG["signal_persistence"]    = self.sf_persistence.isChecked()
+        SAFETY_CFG["btc_trend_check"]       = self.sf_btc_check.isChecked()
+        SAFETY_CFG["btc_drop_pct"]          = self.sf_btc_drop.value()
+        SAFETY_CFG["coin_trend_check"]      = self.sf_coin_check.isChecked()
+        SAFETY_CFG["coin_drop_pct"]         = self.sf_coin_drop.value()
+        SAFETY_CFG["max_open_trades"]       = self.sf_max_trades.isChecked()
+        SAFETY_CFG["max_open_trades_count"] = self.sf_max_trades_n.value()
+        SAFETY_CFG["daily_loss_limit"]      = self.sf_daily_loss.isChecked()
+        SAFETY_CFG["daily_loss_amount"]     = self.sf_daily_loss_n.value()
+
     def _apply_config(self):
         global FONT_SIZE
         CFG["max_price"]       = self.cfg_max_price.value()
@@ -5249,6 +5433,29 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         if saved_bp is not None:
             BROWSER_PATH = str(saved_bp)
             self.cfg_browser.setText(BROWSER_PATH)
+
+        # Safety config
+        for k in SAFETY_CFG:
+            val = s.value(f"safety_{k}")
+            if val is not None:
+                if isinstance(SAFETY_CFG[k], bool):
+                    SAFETY_CFG[k] = val in (True, "true", "True", "1")
+                elif isinstance(SAFETY_CFG[k], float):
+                    try: SAFETY_CFG[k] = float(val)
+                    except: pass
+                elif isinstance(SAFETY_CFG[k], int):
+                    try: SAFETY_CFG[k] = int(val)
+                    except: pass
+        if hasattr(self, "sf_persistence"):
+            self.sf_persistence.setChecked(SAFETY_CFG["signal_persistence"])
+            self.sf_btc_check.setChecked(SAFETY_CFG["btc_trend_check"])
+            self.sf_btc_drop.setValue(SAFETY_CFG["btc_drop_pct"])
+            self.sf_coin_check.setChecked(SAFETY_CFG["coin_trend_check"])
+            self.sf_coin_drop.setValue(SAFETY_CFG["coin_drop_pct"])
+            self.sf_max_trades.setChecked(SAFETY_CFG["max_open_trades"])
+            self.sf_max_trades_n.setValue(SAFETY_CFG["max_open_trades_count"])
+            self.sf_daily_loss.setChecked(SAFETY_CFG["daily_loss_limit"])
+            self.sf_daily_loss_n.setValue(SAFETY_CFG["daily_loss_amount"])
 
         # Trading config
         tk = s.value("tradingApiKey")
@@ -5375,6 +5582,13 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         s.setValue("tradingApiSecret", TRADING_CFG["api_secret"])
         s.setValue("tradingTestnet",   TRADING_CFG["testnet"])
         s.setValue("tradingOco",       TRADING_CFG["oco_enabled"])
+        # Safety config
+        try:
+            self._apply_safety_config()
+        except Exception:
+            pass
+        for k, v in SAFETY_CFG.items():
+            s.setValue(f"safety_{k}", v)
         # Save all CFG spinbox values directly from widgets (no Apply click needed)
         try:
             s.setValue("topN",    self.cfg_top_n.value())
