@@ -46,7 +46,7 @@ try:
 except ImportError:
     HAS_CHARTS = False
 
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.1"
 
 # ─────────────────────────────────────────────────────────
 #  CONFIG  (edit these to change scan behaviour)
