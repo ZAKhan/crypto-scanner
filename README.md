@@ -111,15 +111,72 @@ A professional PyQt6 desktop application for scanning Binance spot markets, iden
 pip install PyQt6 requests
 ```
 
-### Run
+### Run from source
 ```bash
 python crypto_scanner.py
 ```
 
-### Build binary (Linux)
+### Build local binary
 ```bash
-bash build.sh
+cd ~/apps/cryptoscanner
+./build.sh
 ```
+
+The script will:
+- Check and install PyQt6, requests, PyInstaller if missing
+- Build a standalone binary → `dist/linux/crypto_scanner`
+- Copy to `binary/crypto_scanner` for releases
+- Install to `~/.local/bin/crypto_scanner` — run from anywhere
+- Register in app menu (requires `crypto_scanner.desktop`)
+
+After building, launch with:
+```bash
+crypto_scanner
+```
+Or find it in your app menu under **Finance**.
+
+### First-time app menu setup
+Only needed once after first build:
+```bash
+# Install icon
+mkdir -p ~/.local/share/icons
+cp ~/apps/cryptoscanner/app_icon.png ~/.local/share/icons/crypto_scanner.png
+
+# Install desktop entry
+sed "s|%h|$HOME|g" ~/apps/cryptoscanner/crypto_scanner.desktop \
+    > ~/.local/share/applications/crypto_scanner.desktop
+
+# Refresh app menu
+update-desktop-database ~/.local/share/applications
+```
+
+---
+
+## Development Workflow
+
+```
+1. Edit code
+        ↓
+2. Test:   python crypto_scanner.py
+        ↓
+3. Build:  ./build.sh
+        ↓
+4. Launch: crypto_scanner   (or from app menu)
+        ↓
+5. Release: ./push_release.sh  →  GitHub Actions builds all platforms
+```
+
+### Releasing a new version
+```bash
+./push_release.sh
+```
+When prompted:
+- Enter version number (e.g. `2.0.2`)
+- Confirm APP_VERSION update — script patches it automatically
+- Enter commit message
+- Confirm
+
+GitHub Actions will then build binaries for Linux, Windows and macOS automatically and attach them to the release.
 
 ---
 

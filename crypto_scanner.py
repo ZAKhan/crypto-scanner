@@ -46,7 +46,7 @@ try:
 except ImportError:
     HAS_CHARTS = False
 
-APP_VERSION = "2.0.1"
+APP_VERSION = "2.0.2"
 
 # ─────────────────────────────────────────────────────────
 #  CONFIG  (edit these to change scan behaviour)
@@ -551,6 +551,7 @@ def analyse(symbol, raw_klines, change_24h=0.0):
         "avg_vol":      avg_vol,
         "last_vol":     vols[-1],
         "vol_ratio":    vol_ratio,
+        "vol_spike":    vol_ratio >= 2.0,   # True if volume > 2x average
         "pattern":      pattern,
         "signal":       signal,
         "sig_clr":      sig_clr,
@@ -985,6 +986,9 @@ ALERT_CFG = {
     "picoclaw_queue":   os.path.expanduser("~/.picoclaw/workspace/crypto_alerts.json"),
     "min_potential":    40,         # only alert if Pot% >= this
     "min_exp_move":     3.0,        # only alert if Exp% >= this
+    "max_rsi":          70,         # only alert if RSI <= this
+    "max_bb_pct":       80,         # only alert if BB% <= this (0=oversold, 100=overbought)
+    "require_vol_spike": False,     # only alert if volume spike detected
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -1206,7 +1210,10 @@ class AlertEngine(QObject):
                       (prev == "NEUTRAL" or sig_order.get(prev, 4) > level))
             passes = (level <= min_level and
                       pot >= ALERT_CFG["min_potential"] and
-                      exp >= ALERT_CFG["min_exp_move"])
+                      exp >= ALERT_CFG["min_exp_move"] and
+                      r.get("rsi", 50) <= ALERT_CFG["max_rsi"] and
+                      r.get("bb_pct", 50) <= ALERT_CFG["max_bb_pct"] and
+                      (not ALERT_CFG["require_vol_spike"] or r.get("vol_spike", False)))
 
             if is_new and passes:
                 alert = {
@@ -1545,12 +1552,11 @@ QPushButton#scanBtn {{
         stop:0 #0066aa, stop:1 #00aacc);
     color: white;
     border: none;
-    padding: 10px 30px;
+    padding: 4px 8px;
     font-size: {fs_l}px;
     font-weight: 700;
-    letter-spacing: 1px;
     border-radius: 6px;
-    min-width: 120px;
+    min-width: 0px;
 }}
 QPushButton#scanBtn:hover {{
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
@@ -2321,7 +2327,7 @@ class CryptoScannerWindow(QMainWindow):
         # Show scanning status immediately so user knows it's working
         self.statusBar().showMessage("Starting scan…")
         self.scan_btn.setEnabled(False)
-        self.scan_btn.setText("⏳  Scanning...")
+        self.scan_btn.setText("⏳")
 
     def _build_ui(self):
         central = QWidget()
@@ -2370,12 +2376,9 @@ class CryptoScannerWindow(QMainWindow):
         tlay.addWidget(self._balance_lbl, 0)
 
         # Progress bar — only visible during scan
+        # Keep progress as hidden (used internally, never shown)
         self.progress = QProgressBar()
-        self.progress.setFixedWidth(150)
-        self.progress.setFixedHeight(6)
-        self.progress.setValue(0)
         self.progress.setVisible(False)
-        tlay.addWidget(self.progress, 0)
 
         # Cols reset
         reset_col_btn = QPushButton("⇔ Cols")
@@ -2389,8 +2392,11 @@ class CryptoScannerWindow(QMainWindow):
         tlay.addWidget(reset_col_btn, 0)
 
         # Scan button
-        self.scan_btn = QPushButton("⚡  SCAN")
+        self.scan_btn = QPushButton("⚡")
         self.scan_btn.setObjectName("scanBtn")
+        self.scan_btn.setFixedHeight(30)
+        self.scan_btn.setMinimumWidth(75)
+        self.scan_btn.setToolTip("Scan now")
         self.scan_btn.clicked.connect(self._start_scan)
         tlay.addWidget(self.scan_btn, 0)
 
@@ -2458,6 +2464,11 @@ class CryptoScannerWindow(QMainWindow):
         root.addWidget(tabs)
 
         self.statusBar().showMessage("Ready")
+        # Scan status dot in status bar
+        self._scan_dot = QLabel("⬤")
+        self._scan_dot.setStyleSheet("color: #00cc66; font-size:11px; padding:0 4px;")
+        self._scan_dot.setToolTip("Scanner idle")
+        self.statusBar().addPermanentWidget(self._scan_dot)
         ver_lbl = QLabel(f"  {APP_VERSION}  ")
         ver_lbl.setStyleSheet(
             f"color:{ACCENT}; font-family:{MONO_CSS}; font-weight:700; "
@@ -2798,6 +2809,7 @@ class CryptoScannerWindow(QMainWindow):
 
         detail_act  = menu.addAction("🔍  View Details")
         binance_act = menu.addAction(f"🌐  Open {sym} on Binance")
+        tv_act      = menu.addAction(f"📈  Open {sym} on TradingView")
 
         # Highlight recommended direction
         if "BUY" in sig:
@@ -2815,6 +2827,11 @@ class CryptoScannerWindow(QMainWindow):
         elif action == binance_act:
             sym_url = sym.replace("_", "")
             open_url(f"https://www.binance.com/en/trade/{sym_url}USDT?type=spot&interval=5m")
+        elif action == tv_act:
+            sym_url = sym.replace("_", "")
+            import subprocess
+            subprocess.Popen(["tradingview", "--url",
+                f"https://www.tradingview.com/chart/?symbol=BINANCE:{sym_url}USDT&interval=5"])
 
     # ── Context menu on TRADES table ────────────────────────
     def _trades_context_menu(self, pos):
@@ -2858,6 +2875,7 @@ class CryptoScannerWindow(QMainWindow):
         del_act = menu.addAction("✕  Delete")
 
         binance_act2 = menu.addAction(f"🌐  Open {sym} on Binance")
+        tv_act2      = menu.addAction(f"📈  Open {sym} on TradingView")
 
         action = menu.exec(self.tr_table.viewport().mapToGlobal(pos))
         if action == close_act:
@@ -2873,6 +2891,11 @@ class CryptoScannerWindow(QMainWindow):
         elif action == binance_act2:
             sym_url = trade["symbol"].replace("_USDT","").replace("USDT","").replace("_","")
             open_url(f"https://www.binance.com/en/trade/{sym_url}USDT?type=spot&interval=5m")
+        elif action == tv_act2:
+            sym_url = trade["symbol"].replace("_USDT","").replace("USDT","").replace("_","")
+            import subprocess
+            subprocess.Popen(["tradingview", "--url",
+                f"https://www.tradingview.com/chart/?symbol=BINANCE:{sym_url}USDT&interval=5"])
 
     # ── Record trade from scanner right-click ───────────────
     def _record_trade(self, r, side):
@@ -3332,7 +3355,7 @@ class CryptoScannerWindow(QMainWindow):
                 if "Trade" in tabs.tabText(i):
                     tabs.setCurrentIndex(i)
                     break
-        self.statusBar().showMessage(status_msg)
+        self._show_status(status_msg)
 
     # ── Close trade dialog ───────────────────────────────────
     def _close_trade_dialog(self, checked=False, tid=None, prefill_price=None):
@@ -3340,7 +3363,7 @@ class CryptoScannerWindow(QMainWindow):
         if tid is None:
             row = self.tr_table.currentRow()
             if row < 0:
-                self.statusBar().showMessage("Select a trade row first")
+                self._show_status("Select a trade row first")
                 return
             item = self.tr_table.item(row, 0)
             if item is None: return
@@ -3348,7 +3371,7 @@ class CryptoScannerWindow(QMainWindow):
 
         trade = next((t for t in self._trades if t["id"] == tid), None)
         if trade is None or trade["status"] != "OPEN":
-            self.statusBar().showMessage("Trade is already closed")
+            self._show_status("Trade is already closed")
             return
 
         sym   = trade["symbol"].replace("USDT", "")
@@ -3493,7 +3516,7 @@ class CryptoScannerWindow(QMainWindow):
         if tid is None:
             row = self.tr_table.currentRow()
             if row < 0:
-                self.statusBar().showMessage("Select a trade row first")
+                self._show_status("Select a trade row first")
                 return
             item = self.tr_table.item(row, 0)
             if item is None: return
@@ -3559,13 +3582,13 @@ class CryptoScannerWindow(QMainWindow):
         trade["note"]  = note_edit.text().strip()
         self._save_trades()
         self._refresh_trades_table()
-        self.statusBar().showMessage(f"Trade updated: {side} {sym}")
+        self._show_status(f"Trade updated: {side} {sym}")
 
     # ── Delete selected trade ────────────────────────────────
     def _delete_trade(self):
         rows = self.tr_table.selectionModel().selectedRows()
         if not rows:
-            self.statusBar().showMessage("Select one or more trade rows first")
+            self._show_status("Select one or more trade rows first")
             return
         tids = set()
         for idx in rows:
@@ -3588,7 +3611,7 @@ class CryptoScannerWindow(QMainWindow):
     def _remove_won_trades(self):
         closed = [t for t in self._trades if t["status"] in ("WIN", "LOSS")]
         if not closed:
-            self.statusBar().showMessage("No closed trades to remove")
+            self._show_status("No closed trades to remove")
             return
         wins   = sum(1 for t in closed if t["status"] == "WIN")
         losses = sum(1 for t in closed if t["status"] == "LOSS")
@@ -3605,7 +3628,7 @@ class CryptoScannerWindow(QMainWindow):
         self._trades = [t for t in self._trades if t["id"] not in closed_ids]
         self._save_trades()
         self._refresh_trades_table()
-        self.statusBar().showMessage(f"Removed {len(closed_ids)} closed trade(s)")
+        self._show_status(f"Removed {len(closed_ids)} closed trade(s)")
 
     # ── Refresh trades table ─────────────────────────────────
     def _refresh_trades_table(self):
@@ -3816,7 +3839,7 @@ class CryptoScannerWindow(QMainWindow):
                 json.dump(self._trades, f, indent=2)
             os.replace(tmp, self.TRADES_FILE)
         except Exception as e:
-            self.statusBar().showMessage(f"Trade save error: {e}")
+            self._show_status(f"Trade save error: {e}")
 
     def _log_trade_event(self, event: str, trade: dict):
         """Append a timestamped line to the audit log file."""
@@ -3924,7 +3947,7 @@ class CryptoScannerWindow(QMainWindow):
         except Exception as e:
             import traceback
             traceback.print_exc()
-            self.statusBar().showMessage(f"⚠ SL/TP check error: {str(e)[:60]}")
+            self._show_status(f"⚠ SL/TP check error: {str(e)[:60]}")
 
     def _check_sltp_hits_inner(self, results):
         """Called after every scan. Auto-closes open trades whose SL or TP has been crossed.
@@ -4089,62 +4112,103 @@ class CryptoScannerWindow(QMainWindow):
                 writer.writeheader()
                 for t in self._trades:
                     writer.writerow({k: t.get(k,"") for k in writer.fieldnames})
-            self.statusBar().showMessage(f"Trades exported → {fname}")
+            self._show_status(f"Trades exported → {fname}")
         except Exception as e:
-            self.statusBar().showMessage(f"CSV export error: {e}")
+            self._show_status(f"CSV export error: {e}")
 
     def _build_alerts_tab(self):
+        # Wrap in scroll area so content never clips on small windows
+        outer = QWidget()
+        outer_lay = QVBoxLayout(outer)
+        outer_lay.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
         w = QWidget()
         lay = QVBoxLayout(w)
-        lay.setContentsMargins(20, 16, 20, 16)
-        lay.setSpacing(14)
+        lay.setContentsMargins(16, 12, 16, 12)
+        lay.setSpacing(8)
 
         auto_grp = QGroupBox("AUTO-SCAN & TRIGGER")
         aglay = QGridLayout(auto_grp)
-        aglay.setSpacing(10)
+        aglay.setSpacing(6)
+        aglay.setColumnMinimumWidth(0, 160)
+        aglay.setColumnStretch(0, 0)
+        aglay.setColumnStretch(1, 1)
 
         self.al_enabled = QCheckBox("Enable auto-scan alerts")
         self.al_enabled.setChecked(ALERT_CFG["enabled"])
         self.al_enabled.setStyleSheet(f"color:{WHITE};")
 
         self.al_interval = QSpinBox()
+        self.al_interval.setFixedWidth(160)
         self.al_interval.setRange(30, 3600)
         self.al_interval.setValue(ALERT_CFG["interval_sec"])
         self.al_interval.setSuffix("s")
 
         self.al_min_signal = QComboBox()
+        self.al_min_signal.setFixedWidth(160)
         for s in ["BUY", "STRONG BUY"]:
             self.al_min_signal.addItem(s)
         self.al_min_signal.setCurrentText(ALERT_CFG["min_signal"])
 
         self.al_min_pot = QSpinBox()
+        self.al_min_pot.setFixedWidth(160)
         self.al_min_pot.setRange(0, 100)
         self.al_min_pot.setValue(ALERT_CFG["min_potential"])
         self.al_min_pot.setSuffix("%")
 
         self.al_min_exp = QDoubleSpinBox()
+        self.al_min_exp.setFixedWidth(160)
         self.al_min_exp.setRange(0, 50)
         self.al_min_exp.setValue(ALERT_CFG["min_exp_move"])
         self.al_min_exp.setSuffix("%")
 
-        aglay.addWidget(self.al_enabled,                             0, 0, 1, 2)
-        aglay.addWidget(QLabel("Scan interval"),                     1, 0)
-        aglay.addWidget(self.al_interval,                            1, 1)
-        aglay.addWidget(QLabel("Minimum signal"),                    2, 0)
-        aglay.addWidget(self.al_min_signal,                          2, 1)
-        aglay.addWidget(QLabel("Min Potential %"),                   3, 0)
-        aglay.addWidget(self.al_min_pot,                             3, 1)
-        aglay.addWidget(QLabel("Min Exp Move %"),                    4, 0)
-        aglay.addWidget(self.al_min_exp,                             4, 1)
-        for i in range(aglay.rowCount()):
-            lbl = aglay.itemAtPosition(i, 0)
-            if lbl and lbl.widget():
-                lbl.widget().setStyleSheet(f"color:{DIM};")
-        lay.addWidget(auto_grp)
+        self.al_max_rsi = QSpinBox()
+        self.al_max_rsi.setFixedWidth(160)
+        self.al_max_rsi.setRange(1, 100)
+        self.al_max_rsi.setValue(ALERT_CFG["max_rsi"])
+        self.al_max_rsi.setToolTip("Only alert if RSI is below this value")
+
+        self.al_max_bb = QSpinBox()
+        self.al_max_bb.setFixedWidth(160)
+        self.al_max_bb.setRange(0, 200)
+        self.al_max_bb.setValue(ALERT_CFG["max_bb_pct"])
+        self.al_max_bb.setSuffix("%")
+        self.al_max_bb.setToolTip("Only alert if BB% is below this")
+
+        self.al_vol_spike = QCheckBox("Require volume spike")
+        self.al_vol_spike.setChecked(ALERT_CFG["require_vol_spike"])
+        self.al_vol_spike.setStyleSheet(f"color:{WHITE};")
+
+        rows = [
+            ("Scan interval",   self.al_interval),
+            ("Minimum signal",  self.al_min_signal),
+            ("Min Potential %", self.al_min_pot),
+            ("Min Exp Move %",  self.al_min_exp),
+            ("Max RSI",         self.al_max_rsi),
+            ("Max BB%",         self.al_max_bb),
+        ]
+        aglay.addWidget(self.al_enabled, 0, 0, 1, 2)
+        for i, (lbl_text, widget) in enumerate(rows, 1):
+            lbl = QLabel(lbl_text)
+            lbl.setStyleSheet(f"color:{DIM};")
+            aglay.addWidget(lbl, i, 0)
+            aglay.addWidget(widget, i, 1, Qt.AlignmentFlag.AlignLeft)
+        aglay.addWidget(self.al_vol_spike, len(rows) + 1, 0, 1, 2)
+
+        # Top row: auto-scan left, notification channels right
+        top_row = QHBoxLayout()
+        top_row.setSpacing(10)
+        top_row.addWidget(auto_grp, 1)
 
         ch_grp = QGroupBox("NOTIFICATION CHANNELS")
         chlay = QVBoxLayout(ch_grp)
-        chlay.setSpacing(8)
+        chlay.setSpacing(4)
+        chlay.setContentsMargins(12, 8, 12, 8)
 
         self.al_sound   = QCheckBox("🔊  Sound alert  (via ffplay — ascending beep = long, descending = short)")
         self.al_desktop = QCheckBox("🖥  Desktop notification  (via notify-send)")
@@ -4248,7 +4312,8 @@ class CryptoScannerWindow(QMainWindow):
         chlay.addWidget(self.al_wa)
         chlay.addWidget(wa_frame)
 
-        lay.addWidget(ch_grp)
+        top_row.addWidget(ch_grp, 1)
+        lay.addLayout(top_row)
 
         btn_row = QHBoxLayout()
         apply_btn = QPushButton("✓  Apply Alert Settings")
@@ -4288,7 +4353,9 @@ class CryptoScannerWindow(QMainWindow):
         lay.addWidget(log_grp)
 
         lay.addStretch()
-        return w
+        scroll.setWidget(w)
+        outer_lay.addWidget(scroll)
+        return outer
 
     def _apply_alert_config(self):
         ALERT_CFG["enabled"]          = self.al_enabled.isChecked()
@@ -4297,6 +4364,9 @@ class CryptoScannerWindow(QMainWindow):
         ALERT_CFG["min_signal"]       = self.al_min_signal.currentText()
         ALERT_CFG["min_potential"]    = self.al_min_pot.value()
         ALERT_CFG["min_exp_move"]     = self.al_min_exp.value()
+        ALERT_CFG["max_rsi"]          = self.al_max_rsi.value()
+        ALERT_CFG["max_bb_pct"]       = self.al_max_bb.value()
+        ALERT_CFG["require_vol_spike"] = self.al_vol_spike.isChecked()
         ALERT_CFG["sound"]            = self.al_sound.isChecked()
         ALERT_CFG["desktop"]          = self.al_desktop.isChecked()
         ALERT_CFG["telegram"]         = self.al_tg.isChecked()
@@ -4327,7 +4397,7 @@ class CryptoScannerWindow(QMainWindow):
         }
         self._alert_engine._fire(fake)
         self._on_new_alert(fake)
-        self.statusBar().showMessage("Test alert fired — check sound / desktop / Telegram / WhatsApp queue")
+        self._show_status("Test alert fired — check sound / desktop / Telegram / WhatsApp queue")
 
     def _copy_picoclaw_config(self):
         """Copy the PicoClaw config.json WhatsApp snippet to clipboard."""
@@ -4451,9 +4521,8 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         """Background scan just started — update button to show scanning state."""
         if self._worker is None or not self._worker.isRunning():
             self.scan_btn.setEnabled(False)
-            self.scan_btn.setText("⏳  Scanning...")
-            self.progress.setVisible(True)
-            self.progress.setRange(0, 0)  # indeterminate spinner
+            self.scan_btn.setText("⏳")
+            self._set_dot_scanning()
 
     def _on_alert_scan_done(self, results):
         """Background alert scan completed — update table silently if no manual scan running."""
@@ -4468,9 +4537,8 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
             self.statusBar().showMessage(
                 f"Auto-scan: {n} coins  [{datetime.now().strftime('%H:%M:%S')}]")
             self.scan_btn.setEnabled(True)
-            self.scan_btn.setText("⚡  SCAN")
-            self.progress.setRange(0, 100)
-            self.progress.setVisible(False)
+            self.scan_btn.setText("⚡")
+            self._set_dot_idle(n)
 
     def _clear_alert_log(self):
         self._alert_log.clear()
@@ -5278,6 +5346,10 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         try:
             self.al_enabled.setChecked(ALERT_CFG["enabled"])
             self.al_interval.setValue(int(ALERT_CFG["interval_sec"]))
+            if hasattr(self, "al_max_rsi"):
+                self.al_max_rsi.setValue(int(ALERT_CFG.get("max_rsi", 70)))
+                self.al_max_bb.setValue(int(ALERT_CFG.get("max_bb_pct", 80)))
+                self.al_vol_spike.setChecked(ALERT_CFG.get("require_vol_spike", False))
             self.al_min_signal.setCurrentText(ALERT_CFG["min_signal"])
             self.al_min_pot.setValue(int(ALERT_CFG["min_potential"]))
             self.al_min_exp.setValue(float(ALERT_CFG["min_exp_move"]))
@@ -5371,8 +5443,13 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
     def closeEvent(self, event):
         self._alert_engine.stop()
         self._trades_refresh_timer.stop()
+        self._dot_blink_timer.stop()
         self._save_settings()
         super().closeEvent(event)
+
+    def _show_status(self, msg, timeout_ms=10000):
+        """Show status bar message — auto-clears after timeout (default 10s)."""
+        self.statusBar().showMessage(msg, timeout_ms)
 
     def _setup_timer(self):
         self._progress_timer = QTimer()
@@ -5383,13 +5460,34 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         self._trades_refresh_timer.setInterval(3000)
         self._trades_refresh_timer.timeout.connect(self._fetch_open_trade_prices)
 
+        # Blink timer for scanning dot
+        self._dot_blink_state = True
+        self._dot_blink_timer = QTimer()
+        self._dot_blink_timer.setInterval(500)
+        self._dot_blink_timer.timeout.connect(self._blink_dot)
+
+    def _blink_dot(self):
+        """Alternate dot color while scanning."""
+        self._dot_blink_state = not self._dot_blink_state
+        color = "#00aaff" if self._dot_blink_state else "#004488"
+        self._scan_dot.setStyleSheet(f"color: {color}; font-size: 14px;")
+
+    def _set_dot_scanning(self):
+        self._dot_blink_timer.start()
+        self._scan_dot.setToolTip("Scanning…")
+
+    def _set_dot_idle(self, coin_count=None):
+        self._dot_blink_timer.stop()
+        self._scan_dot.setStyleSheet("color: #00cc66; font-size: 14px;")
+        tip = f"Last scan: {coin_count} coins" if coin_count else "Scanner idle"
+        self._scan_dot.setToolTip(tip)
+
     def _start_scan(self):
         if self._worker and self._worker.isRunning():
             return
         self.scan_btn.setEnabled(False)
-        self.scan_btn.setText("⏳  Scanning...")
-        self.progress.setVisible(True)
-        self.progress.setValue(0)
+        self.scan_btn.setText("⏳")
+        self._set_dot_scanning()
         self.table.setRowCount(0)
         self.statusBar().showMessage("Fetching tickers...")
 
@@ -5415,10 +5513,10 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         self._populate_picks(results)
         self._check_sltp_hits(results)     # auto-close SL/TP hit trades
         self._refresh_trades_table()       # update unrealised P&L
-        self._refresh_balance_display()    # update balance in top bar
+        self._refresh_balance_display()
         self.scan_btn.setEnabled(True)
-        self.scan_btn.setText("⚡  SCAN")
-        self.progress.setVisible(False)
+        self.scan_btn.setText("⚡")
+        self._set_dot_idle(len(results))
      
         n = len(results)
         self.statusBar().showMessage(f"Done — {n} coins  [{datetime.now().strftime('%H:%M:%S')}]")
@@ -5441,7 +5539,7 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
 
     def _on_error(self, msg):
         self.scan_btn.setEnabled(True)
-        self.scan_btn.setText("⚡  SCAN")
+        self.scan_btn.setText("⚡")
         self.progress.setVisible(False)
         self.statusBar().showMessage(f"Error: {msg[:60]}")
         self.statusBar().showMessage(f"Error: {msg}")
