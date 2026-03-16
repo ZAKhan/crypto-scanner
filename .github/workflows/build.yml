@@ -1,11 +1,13 @@
 name: Build Binaries
-
 on:
   push:
     branches: [main]
     tags:
       - 'v*'
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -18,24 +20,18 @@ jobs:
             output: crypto_scanner.exe
           - os: macos-latest
             output: crypto_scanner
-
     runs-on: ${{ matrix.os }}
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Install dependencies
         run: pip install pyinstaller PyQt6 requests
-
       - name: Build binary
         run: pyinstaller --onefile --windowed --name crypto_scanner crypto_scanner.py
-
       - name: Rename binary for platform
         shell: bash
         run: |
@@ -47,7 +43,6 @@ jobs:
           else
             cp dist/crypto_scanner release_files/crypto_scanner_linux
           fi
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -58,13 +53,13 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
-
+    permissions:
+      contents: write
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts/
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -72,4 +67,4 @@ jobs:
           generate_release_notes: false
           name: Crypto Scanner ${{ github.ref_name }}
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
