@@ -46,7 +46,7 @@ try:
 except ImportError:
     HAS_CHARTS = False
 
-APP_VERSION = "v1.3.3"
+APP_VERSION = "2.0.0"
 
 # ─────────────────────────────────────────────────────────
 #  CONFIG  (edit these to change scan behaviour)
@@ -57,6 +57,7 @@ CFG = {
     "interval":        "5m",
     "candle_limit":    50,
     "top_n":           30,
+    "picks_n":         5,
     "rsi_period":      14,
     "base_url":        "https://api.binance.com",
     # ── Risk Management ──────────────────────────────
@@ -75,16 +76,27 @@ CFG = {
 # ─────────────────────────────────────────────────────────
 def open_url(url: str) -> None:
     """
-    Open a URL in the system browser. Tries multiple methods in order
-    so it works correctly when running as a PyInstaller binary on any
-    desktop (Wayland, X11, Ubuntu, Arch).
+    Open a URL in the system browser. If BROWSER_PATH is set (via Config tab)
+    that binary is used directly. Otherwise tries multiple fallbacks so it works
+    correctly when running as a PyInstaller binary on any desktop (Wayland, X11).
     """
     import shutil, os
+    env = os.environ.copy()
+
+    # 0. User-specified browser from Config tab
+    if BROWSER_PATH and BROWSER_PATH.strip():
+        try:
+            subprocess.Popen(
+                [BROWSER_PATH.strip(), url], env=env,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            return
+        except Exception:
+            pass  # fall through to defaults
 
     # 1. xdg-open with explicit env so DISPLAY/WAYLAND_DISPLAY are passed through
     xdg = shutil.which("xdg-open")
     if xdg:
-        env = os.environ.copy()
         try:
             proc = subprocess.Popen(
                 [xdg, url], env=env,
@@ -112,7 +124,7 @@ def open_url(url: str) -> None:
         if b:
             try:
                 subprocess.Popen(
-                    [b, url],
+                    [b, url], env=env,
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
                 return
@@ -197,7 +209,7 @@ def calc_rsi(closes, period=14):
         al = (al * (period - 1) + losses[i]) / period
     if al == 0:
         return 100.0
-    return round(100 - 100 / (1 + ag / al), 2)
+    return round(100 - 100 / (1 + ag / al), 2) if al > 0 else (100.0 if ag > 0 else 50.0)
 
 def calc_macd(closes, fast=12, slow=26, sig=9):
     if len(closes) < slow + sig:
@@ -234,7 +246,7 @@ def calc_stoch_rsi(closes, period=14):
     lo, hi = min(win), max(win)
     if hi == lo:
         return 50.0
-    return round((rsi_vals[-1] - lo) / (hi - lo) * 100, 2)
+    return round((rsi_vals[-1] - lo) / (hi - lo) * 100, 2) if (hi - lo) > 0 else 50.0
 
 def detect_pattern(candles):
     if len(candles) < 5:
@@ -551,6 +563,310 @@ def analyse(symbol, raw_klines, change_24h=0.0):
     return result
 
 # ─────────────────────────────────────────────────────────
+#  TRADING CONFIG
+# ─────────────────────────────────────────────────────────
+TRADING_CFG = {
+    "api_key":    "",
+    "api_secret": "",
+    "testnet":    True,   # always start on testnet
+    "oco_enabled": True,  # place OCO stop-loss on Binance after buy
+}
+
+TESTNET_BASE = "https://testnet.binance.vision"
+LIVE_BASE    = "https://api.binance.com"
+
+def trading_base() -> str:
+    return TESTNET_BASE if TRADING_CFG["testnet"] else LIVE_BASE
+
+
+# ─────────────────────────────────────────────────────────
+#  BINANCE TRADER  — signed REST calls, order placement
+# ─────────────────────────────────────────────────────────
+class BinanceTrader:
+    """
+    Handles all authenticated Binance API calls.
+    Uses HMAC-SHA256 signing (standard key type).
+    Every public method returns (success: bool, data: dict | str).
+    Never raises — all exceptions are caught and returned as errors.
+    """
+
+    MAX_RETRIES = 3
+    TIMEOUT     = 10  # seconds per request
+
+    # ── Signing ──────────────────────────────────────────
+    @staticmethod
+    def _sign(params: dict, secret: str) -> str:
+        import hmac, hashlib, urllib.parse
+        query = urllib.parse.urlencode(params)
+        return hmac.new(
+            secret.encode("utf-8"),
+            query.encode("utf-8"),
+            hashlib.sha256
+        ).hexdigest()
+
+    def _signed_request(self, method: str, path: str,
+                        params: dict | None = None) -> tuple[bool, dict]:
+        """
+        Send a signed request with retry + exponential backoff.
+        Returns (True, response_dict) or (False, {"error": "..."}).
+        """
+        import time, urllib.parse
+
+        key    = TRADING_CFG["api_key"].strip()
+        secret = TRADING_CFG["api_secret"].strip()
+        if not key or not secret:
+            return False, {"error": "API key / secret not configured"}
+
+        p = dict(params or {})
+
+        last_err = ""
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                p["timestamp"] = int(time.time() * 1000)
+                p["recvWindow"] = 5000
+                p["signature"] = self._sign(p, secret)
+
+                url     = trading_base() + path
+                headers = {"X-MBX-APIKEY": key}
+
+                if method == "GET":
+                    resp = requests.get(url, params=p,
+                                        headers=headers, timeout=self.TIMEOUT)
+                elif method == "POST":
+                    resp = requests.post(url, data=p,
+                                         headers=headers, timeout=self.TIMEOUT)
+                elif method == "DELETE":
+                    resp = requests.delete(url, params=p,
+                                           headers=headers, timeout=self.TIMEOUT)
+                else:
+                    return False, {"error": f"Unknown method {method}"}
+
+                data = resp.json()
+
+                if resp.status_code == 200:
+                    return True, data
+
+                # Binance error — no point retrying 400 errors
+                code = data.get("code", 0)
+                msg  = data.get("msg", str(data))
+                if resp.status_code == 400 or resp.status_code == 401:
+                    return False, {"error": f"[{code}] {msg}"}
+
+                last_err = f"HTTP {resp.status_code}: {msg}"
+
+            except requests.exceptions.Timeout:
+                last_err = f"Timeout (attempt {attempt + 1})"
+            except requests.exceptions.ConnectionError:
+                last_err = f"Connection error (attempt {attempt + 1})"
+            except Exception as e:
+                last_err = str(e)
+
+            if attempt < self.MAX_RETRIES - 1:
+                import time as _t
+                _t.sleep(0.5 * (attempt + 1))  # 0.5s, 1.0s backoff
+
+        return False, {"error": last_err}
+
+    # ── Public methods ───────────────────────────────────
+
+    def test_connection(self) -> tuple[bool, str]:
+        """
+        Ping Binance and fetch account info to verify keys work.
+        Returns (True, "Connected — X USDT available") or (False, error).
+        """
+        ok, data = self._signed_request("GET", "/api/v3/account")
+        if not ok:
+            return False, data.get("error", "Unknown error")
+        balances = {b["asset"]: float(b["free"])
+                    for b in data.get("balances", [])
+                    if float(b["free"]) > 0}
+        usdt = balances.get("USDT", 0)
+        env  = "TESTNET" if TRADING_CFG["testnet"] else "LIVE"
+        return True, f"✓ Connected ({env}) — {usdt:,.2f} USDT available"
+
+    def get_usdt_balance(self) -> tuple[bool, float]:
+        """Returns (True, usdt_balance) or (False, 0.0)."""
+        ok, data = self._signed_request("GET", "/api/v3/account")
+        if not ok:
+            return False, 0.0
+        for b in data.get("balances", []):
+            if b["asset"] == "USDT":
+                return True, float(b["free"])
+        return True, 0.0
+
+    def get_asset_balance(self, asset: str) -> tuple[bool, float]:
+        """Returns (True, free_balance) for any asset, or (False, 0.0)."""
+        ok, data = self._signed_request("GET", "/api/v3/account")
+        if not ok:
+            return False, 0.0
+        for b in data.get("balances", []):
+            if b["asset"] == asset:
+                return True, float(b["free"])
+        return True, 0.0
+
+    def get_symbol_info(self, symbol: str) -> tuple[bool, dict]:
+        """
+        Fetch LOT_SIZE and PRICE_FILTER for a symbol.
+        Returns (True, {stepSize, minQty, tickSize, minNotional})
+        """
+        try:
+            resp = requests.get(
+                trading_base() + "/api/v3/exchangeInfo",
+                params={"symbol": symbol},
+                timeout=self.TIMEOUT
+            )
+            data = resp.json()
+            filters = {}
+            for sym in data.get("symbols", []):
+                if sym["symbol"] == symbol:
+                    for f in sym.get("filters", []):
+                        if f["filterType"] == "LOT_SIZE":
+                            filters["stepSize"] = float(f["stepSize"])
+                            filters["minQty"]   = float(f["minQty"])
+                        elif f["filterType"] == "PRICE_FILTER":
+                            filters["tickSize"] = float(f["tickSize"])
+                        elif f["filterType"] == "MIN_NOTIONAL":
+                            filters["minNotional"] = float(f.get("minNotional", 10))
+                        elif f["filterType"] == "NOTIONAL":
+                            filters["minNotional"] = float(f.get("minNotional", 10))
+                    return True, filters
+            return False, {"error": f"Symbol {symbol} not found"}
+        except Exception as e:
+            return False, {"error": str(e)}
+
+    def round_step(self, qty: float, step: float) -> float:
+        """Round quantity down to nearest step size."""
+        import math
+        if step <= 0:
+            return qty
+        precision = max(0, -int(math.floor(math.log10(step))))
+        return round(math.floor(qty / step) * step, precision)
+
+    def round_tick(self, price: float, tick: float) -> float:
+        """Round price to nearest tick size."""
+        import math
+        if tick <= 0:
+            return price
+        precision = max(0, -int(math.floor(math.log10(tick))))
+        return round(round(price / tick) * tick, precision)
+
+    def place_market_buy(self, symbol: str,
+                         usdt_amount: float) -> tuple[bool, dict]:
+        """
+        Place a MARKET BUY order for `usdt_amount` USDT worth of `symbol`.
+        Returns (True, order_dict) or (False, {"error": ...}).
+        """
+        # Get symbol filters
+        ok, info = self.get_symbol_info(symbol)
+        if not ok:
+            return False, info
+
+        step = info.get("stepSize", 0.00001)
+        min_notional = info.get("minNotional", 10.0)
+
+        # Get current price to calculate quantity
+        try:
+            pr = requests.get(
+                trading_base() + "/api/v3/ticker/price",
+                params={"symbol": symbol}, timeout=self.TIMEOUT
+            ).json()
+            price = float(pr["price"])
+        except Exception as e:
+            return False, {"error": f"Price fetch failed: {e}"}
+
+        raw_qty = usdt_amount / price
+        qty     = self.round_step(raw_qty, step)
+
+        if qty * price < min_notional:
+            return False, {"error": f"Order too small — minimum {min_notional} USDT notional"}
+
+        return self._signed_request("POST", "/api/v3/order", {
+            "symbol":   symbol,
+            "side":     "BUY",
+            "type":     "MARKET",
+            "quantity": f"{qty:.8f}",
+        })
+
+    def place_oco_sell(self, symbol: str, quantity: float,
+                       tp_price: float, sl_price: float,
+                       sl_limit_price: float) -> tuple[bool, dict]:
+        """
+        Place an OCO sell order (TP limit + SL stop-limit).
+        sl_limit_price should be slightly below sl_price (e.g. 0.1% lower).
+        Returns (True, order_dict) or (False, {"error": ...}).
+        """
+        ok, info = self.get_symbol_info(symbol)
+        if not ok:
+            return False, info
+
+        tick = info.get("tickSize", 0.00001)
+        step = info.get("stepSize", 0.00001)
+
+        qty      = self.round_step(quantity, step)
+        tp_p     = self.round_tick(tp_price, tick)
+        sl_p     = self.round_tick(sl_price, tick)
+        sl_lim_p = self.round_tick(sl_limit_price, tick)
+
+        return self._signed_request("POST", "/api/v3/order/oco", {
+            "symbol":             symbol,
+            "side":               "SELL",
+            "quantity":           f"{qty:.8f}",
+            "price":              f"{tp_p:.8f}",       # TP limit price
+            "stopPrice":          f"{sl_p:.8f}",       # SL trigger
+            "stopLimitPrice":     f"{sl_lim_p:.8f}",   # SL limit
+            "stopLimitTimeInForce": "GTC",
+        })
+
+    def place_market_sell(self, symbol: str,
+                          quantity: float) -> tuple[bool, dict]:
+        """
+        Place a MARKET SELL for exact quantity.
+        Returns (True, order_dict) or (False, {"error": ...}).
+        """
+        ok, info = self.get_symbol_info(symbol)
+        if not ok:
+            return False, info
+
+        step = info.get("stepSize", 0.00001)
+        qty  = self.round_step(quantity, step)
+
+        return self._signed_request("POST", "/api/v3/order", {
+            "symbol":   symbol,
+            "side":     "SELL",
+            "type":     "MARKET",
+            "quantity": f"{qty:.8f}",
+        })
+
+    def cancel_order(self, symbol: str,
+                     order_id: int) -> tuple[bool, dict]:
+        """Cancel a single order by ID."""
+        return self._signed_request("DELETE", "/api/v3/order", {
+            "symbol":  symbol,
+            "orderId": order_id,
+        })
+
+    def cancel_oco(self, symbol: str,
+                   order_list_id: int) -> tuple[bool, dict]:
+        """Cancel an OCO order list by orderListId."""
+        return self._signed_request("DELETE", "/api/v3/orderList", {
+            "symbol":      symbol,
+            "orderListId": order_list_id,
+        })
+
+    def get_open_orders(self, symbol: str) -> tuple[bool, list]:
+        """Get all open orders for a symbol."""
+        ok, data = self._signed_request("GET", "/api/v3/openOrders",
+                                        {"symbol": symbol})
+        if not ok:
+            return False, []
+        return True, data
+
+
+# single shared instance
+_trader = BinanceTrader()
+
+
+# ─────────────────────────────────────────────────────────
 #  BACKGROUND SCANNER THREAD
 # ─────────────────────────────────────────────────────────
 class Scanner:
@@ -793,8 +1109,9 @@ class AlertEngine(QObject):
     - Compares new results against last scan
     - Fires desktop / sound / telegram for NEW signals only
     """
-    new_alert   = pyqtSignal(dict)   # emits alert dict to GUI log
-    scan_done   = pyqtSignal(list)   # emits results to update table
+    new_alert   = pyqtSignal(dict)
+    scan_done   = pyqtSignal(list)
+    scan_started = pyqtSignal()      # emitted when background scan begins
 
     def __init__(self):
         super().__init__()
@@ -832,19 +1149,19 @@ class AlertEngine(QObject):
     def _run_scan(self):
         if self._scanner.scanning:
             return
+        self.scan_started.emit()     # notify UI scan is beginning
         self._scanner.start_scan()
         # Wait for scan to finish
         while self._scanner.scanning:
             time.sleep(0.2)
         results = self._scanner.get_results()
         if results:
-            self._check_alerts(results)   # inject age/conf BEFORE emitting to table
+            self._check_alerts(results)
             self.scan_done.emit(results)
 
     def _check_alerts(self, results):
         now = datetime.now()
 
-        # ── Update age / confirmation tracking for every result ──────────
         for r in results:
             sym  = r["symbol"]
             sig  = r["signal"]
@@ -1059,7 +1376,6 @@ class AlertEngine(QObject):
             pass  # Never crash on notification failure
 
 
-
 # ─────────────────────────────────────────────────────────────
 DARK  = "#0a0e1a"
 DARK2 = "#0f1525"
@@ -1124,7 +1440,8 @@ def mono_font(size=10, bold=False):
     return f
 SANS  = "Inter,Segoe UI,SF Pro Display,sans-serif"
 
-FONT_SIZE = 13   # default — user can change in Config tab
+FONT_SIZE    = 13   # default — user can change in Config tab
+BROWSER_PATH = ""   # empty = use system default; set via Config tab
 
 def make_stylesheet(fs=13):
     """Generate the full app stylesheet at a given base font size."""
@@ -1392,6 +1709,30 @@ class ScanWorker(QThread):
 # ─────────────────────────────────────────────────────────────
 #  SIGNAL BADGE
 # ─────────────────────────────────────────────────────────────
+class TooltipHeaderView(QHeaderView):
+    """
+    QHeaderView subclass that shows per-column tooltips on hover.
+    Tooltip appears after the standard Qt delay (~700ms) and disappears on mouse move.
+    """
+    def __init__(self, orientation, tooltips: dict, parent=None):
+        """
+        tooltips: dict mapping column index -> tooltip string
+        """
+        super().__init__(orientation, parent)
+        self._tooltips = tooltips
+
+    def event(self, e):
+        from PyQt6.QtWidgets import QToolTip
+        if e.type() == e.Type.ToolTip:
+            pos   = e.pos()
+            index = self.logicalIndexAt(pos)
+            tip   = self._tooltips.get(index, "")
+            if tip: QToolTip.showText(e.globalPos(), tip, self)
+            else:   QToolTip.hideText()
+            return True
+        return super().event(e)
+
+
 class SignalBadge(QLabel):
     COLORS = {
         "STRONG BUY":  (GREEN,  STRONG_BUY_BG,  "#00ff88"),
@@ -1470,7 +1811,7 @@ class MiniBar(QWidget):
         p.setBrush(QBrush(QColor(BORDER)))
         p.setPen(Qt.PenStyle.NoPen)
         p.drawRoundedRect(0, 3, w, h - 6, 3, 3)
-        # fill
+     
         v = self.value / 100
         if self.lo_good:
             c = QColor(GREEN) if self.value < 40 else QColor(RED) if self.value > 60 else QColor(YELLOW)
@@ -1524,7 +1865,7 @@ class PriceChart(QWidget):
         w, h  = self.width(), self.height()
         pad_l, pad_r, pad_t, pad_b = 55, 12, 12, 24
 
-        # background
+     
         p.fillRect(0, 0, w, h, QColor(DARK2))
 
         candles = self.candles
@@ -1622,7 +1963,6 @@ class DetailPanel(QScrollArea):
         chg_c  = GREEN if chg >= 0 else RED
         sig_c  = GREEN if "BUY" in sig else RED if "SELL" in sig else DIM
 
-        # ── Header ──────────────────────────────────────
         hdr = QFrame(); hdr.setObjectName("accentCard")
         hlay = QHBoxLayout(hdr)
 
@@ -1644,7 +1984,6 @@ class DetailPanel(QScrollArea):
         hlay.addWidget(badge)
         self.lay.addWidget(hdr)
 
-        # ── Stats row ───────────────────────────────────
         stats_w = QWidget()
         slay    = QHBoxLayout(stats_w)
         slay.setSpacing(8)
@@ -1696,7 +2035,6 @@ class DetailPanel(QScrollArea):
             slay.addWidget(StatCard(lbl, val, col))
         self.lay.addWidget(stats_w)
 
-        # ── Indicators ──────────────────────────────────
         ind_grp = QGroupBox("INDICATORS")
         ind_lay = QGridLayout(ind_grp)
         ind_lay.setSpacing(6)
@@ -1733,7 +2071,6 @@ class DetailPanel(QScrollArea):
         ind_lay.addWidget(macd_val, 3, 1, 1, 2)
         self.lay.addWidget(ind_grp)
 
-        # ── Bollinger Bands ──────────────────────────────
         if r.get("bb_upper"):
             bb_grp = QGroupBox("BOLLINGER BANDS")
             bb_lay = QHBoxLayout(bb_grp)
@@ -1746,7 +2083,6 @@ class DetailPanel(QScrollArea):
                 bb_lay.addWidget(c)
             self.lay.addWidget(bb_grp)
 
-        # ── Support / Resistance ─────────────────────────
         sr_grp = QGroupBox("SUPPORT / RESISTANCE")
         sr_lay = QHBoxLayout(sr_grp)
         sr_lay.addWidget(StatCard("Support",    f"${r['support']:.6f}", GREEN))
@@ -1754,7 +2090,6 @@ class DetailPanel(QScrollArea):
         sr_lay.addWidget(StatCard("Vol 24h",    f"${r['volume_24h']/1e6:.1f}M", ACCENT))
         self.lay.addWidget(sr_grp)
 
-        # ── Trade Setups ─────────────────────────────────
         sl_pct  = CFG["sl_pct"]
         tp_pct  = CFG["tp_pct"]
         tp2_pct = CFG["tp2_pct"]
@@ -1798,7 +2133,6 @@ class DetailPanel(QScrollArea):
 
             self.lay.addWidget(grp)
 
-        # ── Price chart (pure QPainter — no QtCharts needed) ─────
         candles = r.get("candles", [])
         if candles:
             chart_grp = QGroupBox("PRICE  (last 50 candles)")
@@ -1806,7 +2140,6 @@ class DetailPanel(QScrollArea):
             chart_lay.addWidget(PriceChart(candles))
             self.lay.addWidget(chart_grp)
 
-        # ── Pattern + volume ─────────────────────────────
         pv_grp = QGroupBox("PATTERN / VOLUME")
         pv_lay = QHBoxLayout(pv_grp)
         pv_lay.addWidget(StatCard("Pattern", r["pattern"], ACCENT))
@@ -1938,6 +2271,21 @@ class CryptoScannerWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"Crypto Scalper Scanner {APP_VERSION} — Binance")
+
+        # App icon — look next to the script file
+        # App icon — search in several locations
+        import os as _os, sys as _sys
+        _icon_candidates = [
+            _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "app_icon.png"),
+            _os.path.join(_os.getcwd(), "app_icon.png"),
+            _os.path.join(_os.path.dirname(_os.path.abspath(_sys.argv[0])), "app_icon.png"),
+        ]
+        for _icon_path in _icon_candidates:
+            if _os.path.exists(_icon_path):
+                _icon = QIcon(_icon_path)
+                QApplication.instance().setWindowIcon(_icon)
+                self.setWindowIcon(_icon)
+                break
         self.setMinimumSize(1280, 760)
         self._scanner  = Scanner()
         self._worker   = None
@@ -1961,10 +2309,19 @@ class CryptoScannerWindow(QMainWindow):
         self._alert_engine = AlertEngine()
         self._alert_engine.new_alert.connect(self._on_new_alert)
         self._alert_engine.scan_done.connect(self._on_alert_scan_done)
+        self._alert_engine.scan_started.connect(self._on_alert_scan_started)
         self._build_ui()
         self._setup_timer()
         self._restore_settings()  # after UI is built
+        # Start trade price monitor immediately — runs always, not just on Trades tab
+        self._trades_refresh_timer.start()
         self._alert_engine.start()
+        # Refresh balance display on startup
+        QTimer.singleShot(1000, self._refresh_balance_display)
+        # Show scanning status immediately so user knows it's working
+        self.statusBar().showMessage("Starting scan…")
+        self.scan_btn.setEnabled(False)
+        self.scan_btn.setText("⏳  Scanning...")
 
     def _build_ui(self):
         central = QWidget()
@@ -1973,14 +2330,15 @@ class CryptoScannerWindow(QMainWindow):
         root.setSpacing(0)
         root.setContentsMargins(0, 0, 0, 0)
 
-        # ── Top bar ─────────────────────────────────────
         topbar = QFrame()
         topbar.setStyleSheet(f"background:{PANEL}; border-bottom:1px solid {BORDER};")
         topbar.setFixedHeight(64)
         tlay = QHBoxLayout(topbar)
         tlay.setContentsMargins(20, 0, 20, 0)
-        tlay.setSpacing(16)
+        tlay.setSpacing(12)
+        tlay.setSizeConstraint(QHBoxLayout.SizeConstraint.SetNoConstraint)
 
+        # LEFT — title, version, subtitle with stretch=0 (never grow/shrink)
         title = QLabel("◈ CRYPTO SCALPER")
         title.setObjectName("titleLabel")
 
@@ -1988,47 +2346,74 @@ class CryptoScannerWindow(QMainWindow):
         ver.setObjectName("versionLabel")
         ver.setToolTip("Application version")
 
-        sub = QLabel(f"Binance Spot  ·  Price < $1  ·  Vol > $1M  ·  5m")
+        sub = QLabel("Binance Spot  ·  Price < $1  ·  Vol > $1M  ·  5m")
         sub.setObjectName("subtitleLabel")
+        sub.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
 
-        self.scan_btn = QPushButton("⚡  SCAN")
-        self.scan_btn.setObjectName("scanBtn")
-        self.scan_btn.clicked.connect(self._start_scan)
+        tlay.addWidget(title, 0)
+        tlay.addWidget(ver, 0)
+        tlay.addSpacing(14)
+        tlay.addWidget(sub, 0)
 
+        # Stretch pushes everything right
+        tlay.addStretch(1)
 
+        # Balance — fixed width, centred text, never resizes
+        self._balance_lbl = QLabel("💰 —")
+        self._balance_lbl.setFixedWidth(185)
+        self._balance_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+        self._balance_lbl.setStyleSheet(
+            f"color:{ACCENT}; font-family:{MONO_CSS}; font-size:11px; font-weight:700;")
+        self._balance_lbl.setToolTip("USDT balance — click to refresh")
+        self._balance_lbl.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._balance_lbl.mousePressEvent = lambda e: self._refresh_balance_display()
+        tlay.addWidget(self._balance_lbl, 0)
+
+        # Progress bar — only visible during scan
         self.progress = QProgressBar()
-        self.progress.setFixedWidth(200)
+        self.progress.setFixedWidth(150)
         self.progress.setFixedHeight(6)
         self.progress.setValue(0)
         self.progress.setVisible(False)
+        tlay.addWidget(self.progress, 0)
 
-        self.status_lbl = QLabel("Ready — press Scan")
-        self.status_lbl.setObjectName("statusLabel")
+        # Cols reset
+        reset_col_btn = QPushButton("⇔ Cols")
+        reset_col_btn.setFixedHeight(30)
+        reset_col_btn.setMinimumWidth(75)
+        reset_col_btn.setToolTip("Reset column widths to auto-proportional")
+        reset_col_btn.setStyleSheet(
+            f"background:{CARD}; color:{DIM}; border:1px solid {BORDER}; "
+            f"border-radius:4px; font-size:11px; padding:0 8px;")
+        reset_col_btn.clicked.connect(self._reset_column_widths)
+        tlay.addWidget(reset_col_btn, 0)
+
+        # Scan button
+        self.scan_btn = QPushButton("⚡  SCAN")
+        self.scan_btn.setObjectName("scanBtn")
+        self.scan_btn.clicked.connect(self._start_scan)
+        tlay.addWidget(self.scan_btn, 0)
+
+        # status_lbl — kept for compatibility but hidden from top bar
+        # Scan progress goes to statusBar() at bottom only
+        self.status_lbl = QLabel()
+        self.status_lbl.setVisible(False)
 
         # Filter chips
         self.lbl_filter = QLabel()
         self._update_filter_label()
 
-        tlay.addWidget(title)
-        tlay.addWidget(ver)
-        tlay.addWidget(sub)
-        tlay.addStretch()
-        tlay.addWidget(self.status_lbl)
-        tlay.addWidget(self.progress)
-        reset_col_btn = QPushButton("⇔ Cols")
-        reset_col_btn.setFixedHeight(30)
-        reset_col_btn.setToolTip("Reset column widths to auto-proportional")
-        reset_col_btn.setStyleSheet(
-            f"background:{CARD}; color:{DIM}; border:1px solid {BORDER}; "
-            f"border-radius:4px; font-size:11px; padding:0 8px;"
-        )
-        reset_col_btn.clicked.connect(self._reset_column_widths)
-        tlay.addWidget(reset_col_btn)
-
-        tlay.addWidget(self.scan_btn)
         root.addWidget(topbar)
 
-        # ── Tabs — full width, no splitter ──────────────
+        self._live_banner = QLabel(
+            "🔴  LIVE TRADING MODE — real money at risk  🔴")
+        self._live_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._live_banner.setStyleSheet(
+            f"background:#5a0000; color:#ff6666; font-weight:900; "
+            f"font-size:12px; padding:4px; border-bottom:1px solid {RED};")
+        self._live_banner.setVisible(not TRADING_CFG["testnet"])
+        root.addWidget(self._live_banner)
+
         tabs = QTabWidget()
 
         # Scanner table tab
@@ -2072,35 +2457,102 @@ class CryptoScannerWindow(QMainWindow):
         tabs.currentChanged.connect(self._on_tab_changed)
         root.addWidget(tabs)
 
-        # ── Status bar ──────────────────────────────────
         self.statusBar().showMessage("Ready")
+        ver_lbl = QLabel(f"  {APP_VERSION}  ")
+        ver_lbl.setStyleSheet(
+            f"color:{ACCENT}; font-family:{MONO_CSS}; font-weight:700; "
+            f"font-size:11px; padding:0 6px;"
+        )
+        self.statusBar().addPermanentWidget(ver_lbl)
 
     def _build_table(self):
         cols = ["#", "Symbol", "Price", "24h%", "RSI", "StRSI",
                 "MACD", "BB%", "Vol 24h", "Signal", "Pot%", "Exp%", "L/S", "Pattern", "Chart",
                 "AGE", "CONF", "1H", ""]
+
+        COL_TIPS = {
+            0:  "Rank — sorted by potential score after each scan",
+            1:  "Trading pair (always USDT quoted)",
+            2:  "Last traded price in USDT",
+            3:  "24-hour price change %\n>+8% adds to short score, <-10% adds to long score",
+            4:  "RSI (14-period Relative Strength Index)\n"
+                "<30 = oversold → long bias  |  >70 = overbought → short bias\n"
+                "Scores: <25=+5, <30=+4, <35=+3, <40=+2 (long)\n"
+                "        >75=+5, >70=+4, >65=+3, >60=+2 (short)",
+            5:  "Stochastic RSI (0–100)\n"
+                "<20 = strongly oversold (+2 long)\n"
+                ">80 = strongly overbought (+2 short)",
+            6:  "MACD histogram value\n"
+                "Positive + rising = bullish momentum (+3 long)\n"
+                "Negative + falling = bearish momentum (+3 short)",
+            7:  "Bollinger Band position (0–100%)\n"
+                "0% = price at lower band (buy zone, +3 long)\n"
+                "100% = price at upper band (sell zone, +3 short)\n"
+                "Score halved if band width > 12% (wide/noisy bands)",
+            8:  "24-hour trading volume in USDT",
+            9:  "Signal verdict from the confluence scoring system\n"
+                "STRONG BUY:  long ≥ 6 and margin ≥ 3\n"
+                "BUY:         long ≥ 3 and margin ≥ 2\n"
+                "NEUTRAL:     neither side wins clearly\n"
+                "SELL:        short ≥ 3 and margin ≥ 2\n"
+                "STRONG SELL: short ≥ 6 and margin ≥ 3",
+            10: "Potential score (0–100) — composite urgency metric\n"
+                "Signal strength: up to 30pts\n"
+                "Volume ratio:    up to 25pts\n"
+                "BB proximity:    up to 20pts\n"
+                "RSI extremity:   up to 15pts\n"
+                "StochRSI:        up to 10pts",
+            11: "Expected move % — estimated near-term price range\n"
+                "Based on ATR (14-period average true range)\n"
+                "Multiplied by 1.4 for STRONG signals, 1.1 for BUY/SELL",
+            12: "Long score / Short score\n"
+                "Raw indicator confluence points for each direction\n"
+                "Higher long score = stronger buy case\n"
+                "Example: 7/2 = convincing long, 4/3 = weak edge",
+            13: "Last detected candlestick pattern\n"
+                "Hammer / Bull Engulf = bullish (+2 long, -1 short)\n"
+                "Shooting Star / Bear Engulf = bearish (+2 short, -1 long)\n"
+                "Squeeze = BB inside Keltner — breakout imminent (+1)\n"
+                "Doji = indecision\n"
+                "— = no pattern detected",
+            14: "Sparkline — mini price chart of last 50 closes",
+            15: "Signal age (mm:ss) — time since this signal first appeared\n"
+                "Green < 30s (very fresh)\n"
+                "Yellow < 5min\n"
+                "Red > 5min (stale — treat with caution)",
+            16: "Confirmation count — consecutive scans with the same signal\n"
+                "Higher = more reliable. 5+ scans = fully confirmed",
+            17: "1-hour trend direction\n"
+                "↑ Up  = 1H close above 1H EMA (aligns with long)\n"
+                "↓ Down = 1H close below 1H EMA (aligns with short)\n"
+                "→ Flat = no clear trend",
+        }
+
         t = QTableWidget(0, len(cols))
         t.setHorizontalHeaderLabels(cols)
+
+        # Install custom header with per-column tooltips
+        tip_header = TooltipHeaderView(Qt.Orientation.Horizontal, COL_TIPS, t)
+        tip_header.setStretchLastSection(False)
+        tip_header.setSectionsClickable(True)
+        tip_header.sectionClicked.connect(self._on_header_clicked)
+        t.setHorizontalHeader(tip_header)
+
         t.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         t.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         t.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         t.setAlternatingRowColors(False)
         t.setSortingEnabled(False)
         t.verticalHeader().setVisible(False)
-        t.horizontalHeader().setStretchLastSection(False)
         t.setShowGrid(True)
 
         hdr = t.horizontalHeader()
-        # All real columns Interactive — user can drag any of them
         for i in range(len(cols) - 1):
             hdr.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
-        # Last column (index 15) is an invisible spacer that absorbs leftover width
         hdr.setSectionResizeMode(18, QHeaderView.ResizeMode.Stretch)
-        t.setColumnHidden(18, False)   # visible but empty — acts as spacer
+        t.setColumnHidden(18, True)   # hidden spacer — absorbs leftover width invisibly
 
         t.itemDoubleClicked.connect(self._on_row_double_click)
-        t.horizontalHeader().sectionClicked.connect(self._on_header_clicked)
-        t.horizontalHeader().setSectionsClickable(True)
         t.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         t.customContextMenuRequested.connect(self._scanner_context_menu)
         return t
@@ -2152,13 +2604,6 @@ class CryptoScannerWindow(QMainWindow):
     # ─────────────────────────────────────────────────────────
     #  TRADES TAB
     # ─────────────────────────────────────────────────────────
-    TRADES_FILE = os.path.expanduser("~/.crypto_scanner_trades.json")
-
-    # ─────────────────────────────────────────────────────────
-    #  TRADES TAB  — right-click scanner row to open, close inline
-    # ─────────────────────────────────────────────────────────
-    TRADES_FILE = os.path.expanduser("~/.crypto_scanner_trades.json")
-
     def _build_trades_tab(self):
         self._load_trades()
         w = QWidget()
@@ -2170,12 +2615,10 @@ class CryptoScannerWindow(QMainWindow):
         hint.setStyleSheet(f"color:{DIM}; font-size:11px; padding:4px 0;")
         root.addWidget(hint)
 
-        # ── Summary bar ──────────────────────────────────────
         self.tr_summary = QLabel("No trades yet")
         self.tr_summary.setStyleSheet(f"color:{DIM}; font-size:11px; font-weight:700; padding:2px 0;")
         root.addWidget(self.tr_summary)
 
-        # ── Stats + Equity side-by-side ──────────────────────
         stats_equity_row = QHBoxLayout()
         stats_equity_row.setSpacing(12)
 
@@ -2231,13 +2674,12 @@ class CryptoScannerWindow(QMainWindow):
 
         root.addLayout(stats_equity_row)
 
-        # ── Trades table ─────────────────────────────────────
         self.tr_table = QTableWidget(0, 10)
         self.tr_table.setHorizontalHeaderLabels([
             "Opened", "Symbol", "Side", "Entry $", "Qty", "SL $", "TP $", "Exit $", "P&L", "Status"
         ])
         self.tr_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.tr_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.tr_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tr_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.tr_table.verticalHeader().setVisible(False)
         hdr = self.tr_table.horizontalHeader()
@@ -2259,7 +2701,6 @@ class CryptoScannerWindow(QMainWindow):
         self.tr_table.customContextMenuRequested.connect(self._trades_context_menu)
         root.addWidget(self.tr_table)
 
-        # ── Action buttons ───────────────────────────────────
         btn_row = QHBoxLayout()
         close_btn = QPushButton("✓  Close Selected")
         close_btn.setFixedHeight(30)
@@ -2277,13 +2718,22 @@ class CryptoScannerWindow(QMainWindow):
         )
         edit_btn.clicked.connect(self._edit_trade_dialog)
 
-        del_btn = QPushButton("✕  Delete")
+        del_btn = QPushButton("✕  Delete Selected")
         del_btn.setFixedHeight(30)
         del_btn.setStyleSheet(
             f"background:{CARD}; color:{DIM}; border:1px solid {BORDER}; "
             f"border-radius:4px; padding:0 14px;"
         )
         del_btn.clicked.connect(self._delete_trade)
+
+        remove_won_btn = QPushButton("🗑  Remove Closed")
+        remove_won_btn.setFixedHeight(30)
+        remove_won_btn.setToolTip("Remove all closed trades (WIN and LOSS) from history")
+        remove_won_btn.setStyleSheet(
+            f"background:{CARD}; color:#f0c040; border:1px solid #f0c040; "
+            f"border-radius:4px; padding:0 14px;"
+        )
+        remove_won_btn.clicked.connect(self._remove_won_trades)
 
         csv_btn = QPushButton("⬇  Export CSV")
         csv_btn.setFixedHeight(30)
@@ -2296,6 +2746,7 @@ class CryptoScannerWindow(QMainWindow):
         btn_row.addWidget(close_btn)
         btn_row.addWidget(edit_btn)
         btn_row.addWidget(del_btn)
+        btn_row.addWidget(remove_won_btn)
         btn_row.addWidget(csv_btn)
         btn_row.addStretch()
         root.addLayout(btn_row)
@@ -2309,7 +2760,7 @@ class CryptoScannerWindow(QMainWindow):
         if row < 0 or row >= len(self._results):
             return
         r = self._results[row]
-        sym = r["symbol"].replace("USDT", "")
+        sym = r["symbol"].replace("_USDT", "").replace("USDT", "")
         price = r["price"]
         sig   = r["signal"]
 
@@ -2323,6 +2774,22 @@ class CryptoScannerWindow(QMainWindow):
 
         title_act = menu.addAction(f"  {sym}  —  ${price:.6f}")
         title_act.setEnabled(False)
+
+        # Always show trading mode so user always knows context before acting
+        api_key_set = bool(TRADING_CFG["api_key"] or
+                           (hasattr(self, 'cfg_api_key') and self.cfg_api_key.text().strip()))
+        if api_key_set:
+            env = "🧪 TESTNET" if TRADING_CFG["testnet"] else "🔴 LIVE"
+            mode_txt = f"  {env}  —  order will execute on Binance"
+        else:
+            mode_txt = "  📋 Journal only  —  no API key"
+        mode_act = menu.addAction(mode_txt)
+        mode_act.setEnabled(False)
+        # Style the mode line to stand out
+        mode_font = mode_act.font()
+        mode_font.setItalic(True)
+        mode_act.setFont(mode_font)
+
         menu.addSeparator()
 
         long_act  = menu.addAction(f"📈  LONG  (buy {sym})")
@@ -2346,7 +2813,8 @@ class CryptoScannerWindow(QMainWindow):
         elif action == detail_act:
             self._show_detail_popup(r)
         elif action == binance_act:
-            open_url(f"https://www.binance.com/en/trade/{sym}_USDT?type=spot")
+            sym_url = sym.replace("_", "")
+            open_url(f"https://www.binance.com/en/trade/{sym_url}USDT?type=spot&interval=5m")
 
     # ── Context menu on TRADES table ────────────────────────
     def _trades_context_menu(self, pos):
@@ -2380,8 +2848,8 @@ class CryptoScannerWindow(QMainWindow):
         close_act = edit_act = None
         if status == "OPEN":
             # Find current price from last scan results
-            cur = (self._live_prices.get(sym + "USDT") or
-                   next((r["price"] for r in self._results if r["symbol"] == sym + "USDT"), None))
+            cur = (self._live_prices.get(trade["symbol"]) or
+                   next((r["price"] for r in self._results if r["symbol"] == trade["symbol"]), None))
             label = f"✓  Close at current price  (${cur:.6f})" if cur else "✓  Close at price..."
             close_act = menu.addAction(label)
             edit_act  = menu.addAction("✎  Edit entry / SL / TP")
@@ -2393,8 +2861,8 @@ class CryptoScannerWindow(QMainWindow):
 
         action = menu.exec(self.tr_table.viewport().mapToGlobal(pos))
         if action == close_act:
-            cur = (self._live_prices.get(sym + "USDT") or
-                   next((r["price"] for r in self._results if r["symbol"] == sym + "USDT"), None))
+            cur = (self._live_prices.get(trade["symbol"]) or
+                   next((r["price"] for r in self._results if r["symbol"] == trade["symbol"]), None))
             self._close_trade_dialog(tid=tid, prefill_price=cur)
         elif action == edit_act:
             self._edit_trade_dialog(tid=tid)
@@ -2403,17 +2871,17 @@ class CryptoScannerWindow(QMainWindow):
             self._save_trades()
             self._refresh_trades_table()
         elif action == binance_act2:
-            open_url(f"https://www.binance.com/en/trade/{sym}_USDT?type=spot")
+            sym_url = trade["symbol"].replace("_USDT","").replace("USDT","").replace("_","")
+            open_url(f"https://www.binance.com/en/trade/{sym_url}USDT?type=spot&interval=5m")
 
     # ── Record trade from scanner right-click ───────────────
     def _record_trade(self, r, side):
-        """Open a dialog to confirm/edit the trade before recording."""
-        sym   = r["symbol"].replace("USDT", "")
+        """Open trade dialog — fetches live USDT balance, places real order if API configured."""
+        sym   = r["symbol"].replace("_USDT", "").replace("USDT", "")
         price = r["price"]
-
-        # Suggest SL/TP from support/resistance or CFG percentages
         sl_pct = CFG["sl_pct"] / 100
         tp_pct = CFG["tp_pct"] / 100
+
         if side == "LONG":
             suggested_sl = round(price * (1 - sl_pct), 8)
             suggested_tp = round(price * (1 + tp_pct), 8)
@@ -2421,88 +2889,439 @@ class CryptoScannerWindow(QMainWindow):
             suggested_sl = round(price * (1 + sl_pct), 8)
             suggested_tp = round(price * (1 - tp_pct), 8)
 
+        api_ready = bool(TRADING_CFG["api_key"] and TRADING_CFG["api_secret"])
+
         dlg = QDialog(self)
         dlg.setWindowTitle(f"Open {side} — {sym}")
         dlg.setModal(True)
-        dlg.setMinimumWidth(360)
+        dlg.setMinimumWidth(420)
         dlg.setStyleSheet(f"background:{DARK2}; color:{WHITE};")
         vlay = QVBoxLayout(dlg)
         vlay.setSpacing(10)
 
         accent = GREEN if side == "LONG" else RED
         icon   = "📈" if side == "LONG" else "📉"
-        header = QLabel(f"{icon}  <b>{side}</b>  {sym}  —  ${price:.8f}")
+
+        # Mode banner
+        if api_ready:
+            env  = "TESTNET" if TRADING_CFG["testnet"] else "LIVE"
+            col  = GREEN if TRADING_CFG["testnet"] else RED
+            mode_lbl = QLabel(f"{'🧪' if TRADING_CFG['testnet'] else '🔴'}  {env} — order will be placed on Binance")
+            mode_lbl.setStyleSheet(
+                f"background:{'#003a1a' if TRADING_CFG['testnet'] else '#3a0000'}; "
+                f"color:{col}; font-size:11px; font-weight:700; padding:6px; border-radius:4px;")
+        else:
+            mode_lbl = QLabel("📋  Journal only — no API keys configured")
+            mode_lbl.setStyleSheet(
+                f"background:#1a1a2e; color:{DIM}; font-size:11px; padding:6px; border-radius:4px;")
+        vlay.addWidget(mode_lbl)
+
+        header = QLabel(f"{icon}  <b>{side}</b>  {sym}/USDT  —  ${price:.8f}")
         header.setStyleSheet(f"color:{accent}; font-size:13px; padding:4px 0;")
         vlay.addWidget(header)
 
+        # Balance row — only shown when API ready
+        balance_row = QHBoxLayout()
+        balance_lbl = QLabel("USDT Balance:")
+        balance_lbl.setStyleSheet(f"color:{DIM}; font-size:11px;")
+        balance_val = QLabel("Fetching…" if api_ready else "—")
+        balance_val.setStyleSheet(f"color:{ACCENT}; font-size:11px; font-weight:700;")
+        balance_row.addWidget(balance_lbl)
+        balance_row.addWidget(balance_val)
+        balance_row.addStretch()
+        vlay.addLayout(balance_row)
+
+        # % selector buttons
+        pct_row = QHBoxLayout()
+        pct_lbl = QLabel("Use:")
+        pct_lbl.setStyleSheet(f"color:{DIM}; font-size:11px;")
+        pct_row.addWidget(pct_lbl)
+        _avail_usdt = [0.0]  # mutable container for closure
+
+        usdt_spin = QDoubleSpinBox()
+        usdt_spin.setRange(0, 9999999)
+        usdt_spin.setDecimals(2)
+        usdt_spin.setValue(0)
+        usdt_spin.setEnabled(api_ready)
+
+        for pct in (25, 50, 75, 100):
+            btn = QPushButton(f"{pct}%")
+            btn.setFixedHeight(26)
+            btn.setFixedWidth(48)
+            btn.setStyleSheet(
+                f"background:{CARD}; color:{DIM}; border:1px solid {BORDER}; "
+                f"border-radius:4px; font-size:11px;")
+            btn.setEnabled(api_ready)
+            def _set_pct(p=pct):
+                usdt_spin.setValue(round(_avail_usdt[0] * p / 100, 2))
+            btn.clicked.connect(_set_pct)
+            pct_row.addWidget(btn)
+        pct_row.addStretch()
+        vlay.addLayout(pct_row)
+
+        # Main grid
         grid = QGridLayout(); grid.setSpacing(8)
         lbl_s = f"color:{DIM}; font-size:11px;"
 
-        entry_spin = QDoubleSpinBox(); entry_spin.setRange(0.0000001, 999999); entry_spin.setDecimals(8); entry_spin.setValue(price)
-        qty_spin   = QDoubleSpinBox(); qty_spin.setRange(0, 999999999); qty_spin.setDecimals(4); qty_spin.setValue(0)
-        sl_spin    = QDoubleSpinBox(); sl_spin.setRange(0.0000001, 999999); sl_spin.setDecimals(8); sl_spin.setValue(suggested_sl)
-        tp_spin    = QDoubleSpinBox(); tp_spin.setRange(0.0000001, 999999); tp_spin.setDecimals(8); tp_spin.setValue(suggested_tp)
-        note_edit  = QLineEdit(); note_edit.setPlaceholderText("Optional note...")
+        entry_spin = QDoubleSpinBox()
+        entry_spin.setRange(0.0000001,999999); entry_spin.setDecimals(8); entry_spin.setValue(price)
+
+        qty_spin = QDoubleSpinBox(); qty_spin.setRange(0, 999999999)
+        qty_spin.setDecimals(6); qty_spin.setValue(0)
+        qty_spin.setEnabled(not api_ready)  # auto-calculated from USDT when API ready
+
+        sl_spin = QDoubleSpinBox()
+        sl_spin.setRange(0.0000001,999999); sl_spin.setDecimals(8); sl_spin.setValue(suggested_sl)
+
+        sl_pct_spin = QDoubleSpinBox(); sl_pct_spin.setRange(0.01, 50)
+        sl_pct_spin.setDecimals(2); sl_pct_spin.setSuffix("%")
+        sl_pct_spin.setValue(CFG["sl_pct"])
+        sl_pct_spin.setFixedWidth(80)
+        sl_pct_spin.setToolTip("Stop Loss as % from entry")
+
+        tp_spin = QDoubleSpinBox()
+        tp_spin.setRange(0.0000001,999999); tp_spin.setDecimals(8); tp_spin.setValue(suggested_tp)
+
+        tp_pct_spin = QDoubleSpinBox(); tp_pct_spin.setRange(0.01, 100)
+        tp_pct_spin.setDecimals(2); tp_pct_spin.setSuffix("%")
+        tp_pct_spin.setValue(CFG["tp_pct"])
+        tp_pct_spin.setFixedWidth(80)
+        tp_pct_spin.setToolTip("Take Profit as % from entry")
+
+        # Sync: price ↔ % (block signals to avoid recursion)
+        _syncing = [False]
+
+        def _sl_price_changed():
+            if _syncing[0]: return
+            e = entry_spin.value()
+            s = sl_spin.value()
+            if e > 0 and s > 0:
+                _syncing[0] = True
+                pct = abs(e - s) / e * 100
+                sl_pct_spin.setValue(round(pct, 2))
+                _syncing[0] = False
+
+        def _sl_pct_changed():
+            if _syncing[0]: return
+            e = entry_spin.value()
+            p = sl_pct_spin.value()
+            if e > 0:
+                _syncing[0] = True
+                new_sl = round(e * (1 - p/100) if side == "LONG" else e * (1 + p/100), 8)
+                sl_spin.setValue(new_sl)
+                _syncing[0] = False
+
+        def _tp_price_changed():
+            if _syncing[0]: return
+            e = entry_spin.value()
+            t = tp_spin.value()
+            if e > 0 and t > 0:
+                _syncing[0] = True
+                pct = abs(t - e) / e * 100
+                tp_pct_spin.setValue(round(pct, 2))
+                _syncing[0] = False
+
+        def _tp_pct_changed():
+            if _syncing[0]: return
+            e = entry_spin.value()
+            p = tp_pct_spin.value()
+            if e > 0:
+                _syncing[0] = True
+                new_tp = round(e * (1 + p/100) if side == "LONG" else e * (1 - p/100), 8)
+                tp_spin.setValue(new_tp)
+                _syncing[0] = False
+
+        sl_spin.valueChanged.connect(_sl_price_changed)
+        sl_pct_spin.valueChanged.connect(_sl_pct_changed)
+        tp_spin.valueChanged.connect(_tp_price_changed)
+        tp_pct_spin.valueChanged.connect(_tp_pct_changed)
+
+        # Also recalc SL/TP when entry price changes
+        def _entry_changed():
+            _sl_pct_changed()
+            _tp_pct_changed()
+            _update_hint()
+        entry_spin.valueChanged.connect(_entry_changed)
+
+        note_edit = QLineEdit(); note_edit.setPlaceholderText("Optional note…")
+
+        # Select all on focus/click — makes editing any field instant
+        def _spin_select_all(spin):
+            spin.lineEdit().focusInEvent = lambda e: (
+                QLineEdit.focusInEvent(spin.lineEdit(), e),
+                QTimer.singleShot(0, spin.selectAll))
+            spin.lineEdit().mouseReleaseEvent = lambda e: spin.selectAll()
+        for _sp in (usdt_spin, entry_spin, sl_spin, tp_spin, sl_pct_spin, tp_pct_spin):
+            _spin_select_all(_sp)
+
+        # USDT amount label for journal mode
+        usdt_journal = QDoubleSpinBox()
+        usdt_journal.setRange(0, 9999999); usdt_journal.setDecimals(2)
+        usdt_journal.setPrefix("$"); usdt_journal.setValue(0)
+        usdt_journal.setVisible(not api_ready)
 
         pnl_hint = QLabel()
         pnl_hint.setStyleSheet(f"color:{DIM}; font-size:11px;")
 
         def _update_hint():
-            e = entry_spin.value(); q = qty_spin.value()
-            if q > 0 and e > 0:
-                cost = e * q
-                sl_loss = abs(sl_spin.value() - e) * q * (-1 if side == "LONG" else 1)
-                if side == "LONG": sl_loss = -(sl_spin.value() - e) * q if sl_spin.value() < e else 0
-                else:              sl_loss = -(e - sl_spin.value()) * q if sl_spin.value() > e else 0
-                tp_gain = abs(tp_spin.value() - e) * q
-                pnl_hint.setText(f"Cost: ${cost:.2f} USDT  |  SL risk: -${abs(sl_loss):.4f}  |  TP gain: +${tp_gain:.4f}")
+            e = entry_spin.value()
+            if api_ready:
+                u = usdt_spin.value()
+                q = u / e if e > 0 else 0
+                qty_spin.setValue(round(q, 6))
             else:
-                pnl_hint.setText("Enter quantity to see cost and risk")
-        for s in (entry_spin, qty_spin, sl_spin, tp_spin):
-            s.valueChanged.connect(_update_hint)
+                q = qty_spin.value()
+                u = q * e
+            if q > 0 and e > 0:
+                sl_risk = abs(sl_spin.value() - e) * q
+                tp_gain = abs(tp_spin.value() - e) * q
+                rr = tp_gain / sl_risk if sl_risk > 0 else 0
+                pnl_hint.setText(
+                    f"Cost: ${u:.2f} USDT  |  SL risk: -${sl_risk:.4f}  |  "
+                    f"TP gain: +${tp_gain:.4f}  |  R/R: {rr:.2f}x")
+            else:
+                pnl_hint.setText("Enter amount to see cost and risk")
 
-        for i, (lbl, widget) in enumerate([
-            ("Entry price", entry_spin), ("Quantity (coins)", qty_spin),
-            ("Stop Loss",   sl_spin),    ("Take Profit",      tp_spin),
-            ("Note",        note_edit),
-        ]):
+        for w in (qty_spin, sl_spin, tp_spin, usdt_spin, sl_pct_spin, tp_pct_spin):
+            w.valueChanged.connect(_update_hint)
+
+        rows_cfg = [
+            ("Entry price", entry_spin),
+        ]
+        if api_ready:
+            rows_cfg.append(("USDT amount", usdt_spin))
+        else:
+            rows_cfg.append(("USDT amount", usdt_journal))
+            rows_cfg.append(("Qty (coins)", qty_spin))
+
+        for i, (lbl, widget) in enumerate(rows_cfg):
             l = QLabel(lbl); l.setStyleSheet(lbl_s)
             grid.addWidget(l, i, 0)
-            grid.addWidget(widget, i, 1)
+            grid.addWidget(widget, i, 1, 1, 2)
+
+        # SL row — price + % side by side
+        row_sl = len(rows_cfg)
+        sl_lbl = QLabel("Stop Loss"); sl_lbl.setStyleSheet(lbl_s)
+        grid.addWidget(sl_lbl, row_sl, 0)
+        grid.addWidget(sl_spin, row_sl, 1)
+        grid.addWidget(sl_pct_spin, row_sl, 2)
+
+        # TP row — price + % side by side
+        row_tp = row_sl + 1
+        tp_lbl = QLabel("Take Profit"); tp_lbl.setStyleSheet(lbl_s)
+        grid.addWidget(tp_lbl, row_tp, 0)
+        grid.addWidget(tp_spin, row_tp, 1)
+        grid.addWidget(tp_pct_spin, row_tp, 2)
+
+        # Note row
+        row_note = row_tp + 1
+        note_lbl = QLabel("Note"); note_lbl.setStyleSheet(lbl_s)
+        grid.addWidget(note_lbl, row_note, 0)
+        grid.addWidget(note_edit, row_note, 1, 1, 2)
+
+        grid.setColumnStretch(1, 1)
         vlay.addLayout(grid)
         vlay.addWidget(pnl_hint)
+
+        # OCO note
+        if api_ready and TRADING_CFG["oco_enabled"]:
+            oco_note = QLabel("🔒  OCO stop-loss will be placed on Binance after buy")
+            oco_note.setStyleSheet(f"color:{YELLOW}; font-size:10px; padding:2px 0;")
+            vlay.addWidget(oco_note)
 
         btn_row = QHBoxLayout()
         ok_btn = QPushButton(f"{icon}  Confirm Open {side}")
         ok_btn.setStyleSheet(
             f"background:{'#002a1a' if side=='LONG' else '#2a0010'}; color:{accent}; "
-            f"border:1px solid {accent}; border-radius:4px; font-weight:700; padding:4px 16px;"
-        )
+            f"border:1px solid {accent}; border-radius:4px; font-weight:700; padding:4px 16px;")
         ok_btn.clicked.connect(dlg.accept)
         cancel_btn = QPushButton("Cancel")
-        cancel_btn.setStyleSheet(f"background:{CARD}; color:{DIM}; border:1px solid {BORDER}; border-radius:4px; padding:4px 12px;")
+        cancel_btn.setStyleSheet(
+            f"background:{CARD}; color:{DIM}; border:1px solid {BORDER}; border-radius:4px; padding:4px 12px;")
         cancel_btn.clicked.connect(dlg.reject)
         btn_row.addWidget(ok_btn); btn_row.addWidget(cancel_btn)
         vlay.addLayout(btn_row)
+
+        # Status label for order progress
+        order_status = QLabel("")
+        order_status.setStyleSheet(f"color:{DIM}; font-size:11px; padding:2px 0;")
+        order_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        vlay.addWidget(order_status)
+
+        # Fetch balance in background
+        if api_ready:
+            class _BalFetch(QThread):
+                done = pyqtSignal(bool, float)
+                def run(self_):
+                    ok, bal = _trader.get_usdt_balance()
+                    self_.done.emit(ok, bal)
+            def _on_bal(ok, bal):
+                if ok:
+                    _avail_usdt[0] = bal
+                    balance_val.setText(f"${bal:,.2f} USDT")
+                    usdt_spin.setMaximum(bal)
+                    usdt_spin.setValue(round(bal, 2))
+                    _update_hint()
+                else:
+                    balance_val.setText("fetch failed")
+                    balance_val.setStyleSheet(f"color:{RED}; font-size:11px; font-weight:700;")
+            self._bal_thread = _BalFetch()
+            self._bal_thread.done.connect(_on_bal)
+            self._bal_thread.start()
+
         _update_hint()
 
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        trade = {
-            "id":     int(datetime.now().timestamp() * 1000),
-            "time":   datetime.now().strftime("%m-%d %H:%M"),
-            "symbol": sym + "USDT",
-            "side":   side,
-            "entry":  entry_spin.value(),
-            "qty":    qty_spin.value(),
-            "sl":     sl_spin.value(),
-            "tp":     tp_spin.value(),
-            "note":   note_edit.text().strip(),
-            "exit":   None, "pnl": None, "pnl_pct": None,
-            "status": "OPEN",
-        }
+        entry_price = entry_spin.value()
+        sl_price    = sl_spin.value()
+        tp_price    = tp_spin.value()
+        note        = note_edit.text().strip()
+
+        if api_ready:
+            usdt_amount = usdt_spin.value()
+            if usdt_amount <= 0:
+                QMessageBox.warning(self, "Invalid Amount", "USDT amount must be greater than 0.")
+                return
+
+            # Pre-check: verify symbol exists on this exchange before showing progress
+            symbol = r["symbol"]
+            prog_lbl_text = QLabel("Checking symbol…")
+            prog_lbl_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            prog_lbl_text.setStyleSheet(f"color:{ACCENT}; font-size:12px;")
+
+            sym_ok, sym_info = _trader.get_symbol_info(symbol)
+            if not sym_ok:
+                env = "testnet" if TRADING_CFG["testnet"] else "live Binance"
+                reply = QMessageBox.warning(
+                    self, "Symbol Not on Testnet",
+                    f"{symbol} is not available on {env}.\n\n"
+                    f"The scanner uses live Binance data but the testnet has fewer coins.\n\n"
+                    f"Would you like to record this as a journal trade instead\n"
+                    f"(no real order placed)?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+                # Fall through to journal mode by disabling api_ready
+                api_ready = False
+
+            # Show progress dialog
+            prog = QDialog(self)
+            prog.setWindowTitle("Placing Order…")
+            prog.setModal(True)
+            prog.setFixedSize(320, 100)
+            prog.setStyleSheet(f"background:{DARK2}; color:{WHITE};")
+            prog_lay = QVBoxLayout(prog)
+            prog_lbl = QLabel("Placing market BUY on Binance…")
+            prog_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            prog_lbl.setStyleSheet(f"color:{ACCENT}; font-size:12px;")
+            prog_lay.addWidget(prog_lbl)
+            prog.show()
+            QApplication.processEvents()
+
+            # Place market BUY
+            ok, order = _trader.place_market_buy(symbol, usdt_amount)
+
+            if not ok:
+                prog.close()
+                QMessageBox.critical(
+                    self, "Order Failed",
+                    f"Market BUY failed:\n\n{order.get('error', str(order))}\n\n"
+                    f"Trade was NOT recorded."
+                )
+                return
+
+            # Extract fill details from order response
+            fills      = order.get("fills", [])
+            filled_qty = float(order.get("executedQty", 0))
+            if fills:
+                avg_price = sum(float(f["price"]) * float(f["qty"]) for f in fills) / filled_qty
+            else:
+                avg_price = entry_price
+            order_id   = order.get("orderId")
+
+            # Recalculate SL/TP based on actual fill price
+            if side == "LONG":
+                sl_price = round(avg_price * (1 - sl_pct), 8)
+                tp_price = round(avg_price * (1 + tp_pct), 8)
+            else:
+                sl_price = round(avg_price * (1 + sl_pct), 8)
+                tp_price = round(avg_price * (1 - tp_pct), 8)
+
+            oco_order_id = None
+
+            # Place OCO if enabled
+            if TRADING_CFG["oco_enabled"] and side == "LONG":
+                prog_lbl.setText("Placing OCO stop-loss…")
+                QApplication.processEvents()
+                sl_limit = round(sl_price * 0.999, 8)  # limit 0.1% below stop
+                oco_ok, oco_data = _trader.place_oco_sell(
+                    symbol, filled_qty, tp_price, sl_price, sl_limit)
+                if oco_ok:
+                    oco_order_id = oco_data.get("orderListId")
+                else:
+                    # OCO failed — warn but don't abort (trade is already filled)
+                    QMessageBox.warning(
+                        self, "OCO Warning",
+                        f"BUY was filled but OCO stop-loss failed:\n"
+                        f"{oco_data.get('error', str(oco_data))}\n\n"
+                        f"Trade is recorded. Monitor manually or set OCO manually on Binance."
+                    )
+
+            prog.close()
+
+            # Round stored qty to step size — must exactly match what Binance holds
+            ok_info, sym_info = _trader.get_symbol_info(symbol)
+            step = sym_info.get("stepSize", 0.00000001) if ok_info else 0.00000001
+            stored_qty = _trader.round_step(filled_qty, step)
+
+            trade = {
+                "id":           int(datetime.now().timestamp() * 1000),
+                "time":         datetime.now().strftime("%m-%d %H:%M"),
+                "symbol":       symbol,
+                "side":         side,
+                "entry":        round(avg_price, 8),
+                "qty":          stored_qty,
+                "sl":           sl_price,
+                "tp":           tp_price,
+                "note":         note,
+                "exit":         None, "pnl": None, "pnl_pct": None,
+                "status":       "OPEN",
+                "binance_order_id": order_id,
+                "binance_oco_id":   oco_order_id,
+                "live":         not TRADING_CFG["testnet"],
+            }
+            status_msg = (
+                f"✓ BUY filled: {sym} {filled_qty:.6f} @ ${avg_price:.6f}"
+                + (f"  |  OCO set" if oco_order_id else "")
+            )
+
+        else:
+            # Journal-only mode
+            qty_val = usdt_journal.value() / entry_price if usdt_journal.value() > 0 else qty_spin.value()
+            trade = {
+                "id":     int(datetime.now().timestamp() * 1000),
+                "time":   datetime.now().strftime("%m-%d %H:%M"),
+                "symbol": r["symbol"],
+                "side":   side,
+                "entry":  entry_price,
+                "qty":    round(qty_val, 8),
+                "sl":     sl_price,
+                "tp":     tp_price,
+                "note":   note,
+                "exit":   None, "pnl": None, "pnl_pct": None,
+                "status": "OPEN",
+                "binance_order_id": None,
+                "binance_oco_id":   None,
+                "live":   False,
+            }
+            status_msg = f"Opened {side} {sym} @ ${entry_price:.6f} (journal only)"
+
         self._trades.insert(0, trade)
+        self._log_trade_event("OPEN", trade)
         self._save_trades()
         self._refresh_trades_table()
 
@@ -2513,9 +3332,7 @@ class CryptoScannerWindow(QMainWindow):
                 if "Trade" in tabs.tabText(i):
                     tabs.setCurrentIndex(i)
                     break
-        self.statusBar().showMessage(
-            f"Opened {side} {sym} @ ${entry_spin.value():.6f}  qty: {qty_spin.value()}"
-        )
+        self.statusBar().showMessage(status_msg)
 
     # ── Close trade dialog ───────────────────────────────────
     def _close_trade_dialog(self, checked=False, tid=None, prefill_price=None):
@@ -2559,8 +3376,7 @@ class CryptoScannerWindow(QMainWindow):
         lbl_s = f"color:{DIM}; font-size:11px;"
 
         exit_spin = QDoubleSpinBox()
-        exit_spin.setRange(0.0000001, 999999)
-        exit_spin.setDecimals(8)
+        exit_spin.setRange(0.0000001,999999); exit_spin.setDecimals(8)
         exit_spin.setValue(prefill_price if prefill_price else entry)
 
         l = QLabel(f"{close_label} at price"); l.setStyleSheet(lbl_s)
@@ -2611,11 +3427,60 @@ class CryptoScannerWindow(QMainWindow):
             pnl = (entry - ep) * qty
             pct = (entry - ep) / entry * 100
 
-        trade["exit"]    = ep
-        trade["pnl"]     = round(pnl, 8)
-        trade["pnl_pct"] = round(pct, 4)
-        trade["status"]  = "WIN" if pnl >= 0 else "LOSS"
-        trade["closed"]  = datetime.now().strftime("%m-%d %H:%M")
+        api_ready   = bool(TRADING_CFG["api_key"] and TRADING_CFG["api_secret"])
+        order_id    = trade.get("binance_order_id")
+        oco_id      = trade.get("binance_oco_id")
+        symbol_full = trade["symbol"]
+
+        if api_ready and order_id is not None:
+            # Cancel OCO first
+            if oco_id is not None:
+                c_ok, c_data = _trader.cancel_oco(symbol_full, oco_id)
+                if not c_ok:
+                    self.statusBar().showMessage(
+                        f"OCO cancel note: {c_data.get('error','')[:60]}")
+
+            # Round qty to step size so it exactly matches Binance holdings
+            _, s_info = _trader.get_symbol_info(symbol_full)
+            sell_qty = _trader.round_step(qty, s_info.get("stepSize", 0.00000001))
+
+            # Place market SELL — if insufficient balance, retry with actual balance
+            s_ok, s_data = _trader.place_market_sell(symbol_full, sell_qty)
+            if not s_ok and "-2010" in str(s_data):
+                # Balance mismatch — fetch real balance and retry
+                asset = symbol_full.replace("USDT", "")
+                bal_ok, actual_bal = _trader.get_asset_balance(asset)
+                if bal_ok and actual_bal > 0:
+                    _, s_info = _trader.get_symbol_info(symbol_full)
+                    sell_qty = _trader.round_step(actual_bal, s_info.get("stepSize", 1))
+                    s_ok, s_data = _trader.place_market_sell(symbol_full, sell_qty)
+                    if s_ok:
+                        qty = sell_qty  # update qty for P&L calc
+            if not s_ok:
+                QMessageBox.critical(
+                    self, "Sell Failed",
+                    f"Market SELL failed:\n\n{s_data.get('error', str(s_data))}\n\n"
+                    f"Trade was NOT closed. Check Binance manually.")
+                return
+
+            fills    = s_data.get("fills", [])
+            exec_qty = float(s_data.get("executedQty", qty))
+            if fills and exec_qty > 0:
+                ep = sum(float(f["price"]) * float(f["qty"]) for f in fills) / exec_qty
+            if side == "LONG":
+                pnl = (ep - entry) * exec_qty
+                pct = (ep - entry) / entry * 100
+            else:
+                pnl = (entry - ep) * exec_qty
+                pct = (entry - ep) / entry * 100
+
+        trade["exit"]         = round(ep, 8)
+        trade["pnl"]          = round(pnl, 8)
+        trade["pnl_pct"]      = round(pct, 4)
+        trade["status"]       = "WIN" if pnl >= 0 else "LOSS"
+        trade["closed"]       = datetime.now().strftime("%m-%d %H:%M")
+        trade["close_reason"] = "MANUAL"
+        self._log_trade_event("CLOSE", trade)
         self._save_trades()
         self._refresh_trades_table()
         sign = "+" if pnl >= 0 else ""
@@ -2698,19 +3563,58 @@ class CryptoScannerWindow(QMainWindow):
 
     # ── Delete selected trade ────────────────────────────────
     def _delete_trade(self):
-        row = self.tr_table.currentRow()
-        if row < 0:
-            self.statusBar().showMessage("Select a trade row first")
+        rows = self.tr_table.selectionModel().selectedRows()
+        if not rows:
+            self.statusBar().showMessage("Select one or more trade rows first")
             return
-        item = self.tr_table.item(row, 0)
-        if item is None: return
-        tid = item.data(Qt.ItemDataRole.UserRole)
-        self._trades = [t for t in self._trades if t["id"] != tid]
+        tids = set()
+        for idx in rows:
+            item = self.tr_table.item(idx.row(), 0)
+            if item:
+                tids.add(item.data(Qt.ItemDataRole.UserRole))
+        if not tids:
+            return
+        reply = QMessageBox.question(
+            self, "Delete Trades",
+            f"Delete {len(tids)} trade(s)? This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._trades = [t for t in self._trades if t["id"] not in tids]
         self._save_trades()
         self._refresh_trades_table()
 
+    def _remove_won_trades(self):
+        closed = [t for t in self._trades if t["status"] in ("WIN", "LOSS")]
+        if not closed:
+            self.statusBar().showMessage("No closed trades to remove")
+            return
+        wins   = sum(1 for t in closed if t["status"] == "WIN")
+        losses = sum(1 for t in closed if t["status"] == "LOSS")
+        reply = QMessageBox.question(
+            self, "Remove Closed Trades",
+            f"Remove all {len(closed)} closed trade(s) from history?\n"
+            f"({wins} wins, {losses} losses)\n\n"
+            f"Open trades will not be affected.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        closed_ids = {t["id"] for t in closed}
+        self._trades = [t for t in self._trades if t["id"] not in closed_ids]
+        self._save_trades()
+        self._refresh_trades_table()
+        self.statusBar().showMessage(f"Removed {len(closed_ids)} closed trade(s)")
+
     # ── Refresh trades table ─────────────────────────────────
     def _refresh_trades_table(self):
+        try:
+            self._do_refresh_trades_table()
+        except Exception as e:
+            import traceback; traceback.print_exc()
+
+    def _do_refresh_trades_table(self):
         if not hasattr(self, 'tr_table'):
             return
         self.tr_table.setRowCount(0)
@@ -2754,10 +3658,14 @@ class CryptoScannerWindow(QMainWindow):
 
             if trade.get("pnl") is not None:
                 pnl     = trade["pnl"]
-                pct     = trade.get("pnl_pct", 0)
-                sign    = "+" if pnl >= 0 else ""
-                pnl_str = f"{sign}{pnl:.6f}  ({sign}{pct:.2f}%)"
-                pnl_col = GREEN if pnl >= 0 else RED
+                pct     = trade.get("pnl_pct", 0) or 0
+                sign    = "+" if pct >= 0 else ""
+                if pnl == 0 and pct != 0:
+                    # Journal-only trade with no qty — show % only
+                    pnl_str = f"{sign}{pct:.2f}%  (no qty)"
+                else:
+                    pnl_str = f"{sign}{pnl:.4f} USDT  ({sign}{pct:.2f}%)"
+                pnl_col = GREEN if pct >= 0 else RED
             else:
                 # Live unrealised P&L for open trades
                 sym_full = trade["symbol"]
@@ -2897,49 +3805,94 @@ class CryptoScannerWindow(QMainWindow):
                 labels.append(t["symbol"].replace("USDT",""))
             self._equity_canvas.set_data(cum_pts, labels)
 
+    TRADES_FILE = os.path.expanduser("~/.crypto_scanner_trades.json")
+    TRADE_LOG   = os.path.expanduser("~/.crypto_scanner_trade_log.txt")
+
     def _save_trades(self):
         try:
-            with open(self.TRADES_FILE, "w") as f:
+            # Atomic write: write to temp file then rename to avoid corruption
+            tmp = self.TRADES_FILE + ".tmp"
+            with open(tmp, "w") as f:
                 json.dump(self._trades, f, indent=2)
+            os.replace(tmp, self.TRADES_FILE)
         except Exception as e:
             self.statusBar().showMessage(f"Trade save error: {e}")
+
+    def _log_trade_event(self, event: str, trade: dict):
+        """Append a timestamped line to the audit log file."""
+        try:
+            ts  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            env = "TESTNET" if TRADING_CFG["testnet"] else "LIVE"
+            sym = trade.get("symbol", "")
+            sid = trade.get("side", "")
+            line = (f"{ts}  [{env}]  {event:12s}  {sid:5s}  {sym:12s}  "
+                    f"entry={trade.get('entry','')}  qty={trade.get('qty','')}  "
+                    f"sl={trade.get('sl','')}  tp={trade.get('tp','')}  "
+                    f"exit={trade.get('exit','')}  pnl={trade.get('pnl','')}  "
+                    f"status={trade.get('status','')}  "
+                    f"binance_order={trade.get('binance_order_id','')}  "
+                    f"oco={trade.get('binance_oco_id','')}\n")
+            with open(self.TRADE_LOG, "a") as f:
+                f.write(line)
+        except Exception:
+            pass
 
     def _load_trades(self):
         try:
             if os.path.exists(self.TRADES_FILE):
                 with open(self.TRADES_FILE, "r") as f:
-                    self._trades = json.load(f)
+                    data = json.load(f)
+                # Validate it's a list of dicts
+                if isinstance(data, list):
+                    self._trades = [t for t in data if isinstance(t, dict)]
+                else:
+                    self._trades = []
             else:
                 self._trades = []
-        except Exception:
+        except Exception as e:
+            print(f"[WARN] Could not load trades: {e} — starting fresh")
             self._trades = []
-
 
     # ─────────────────────────────────────────────────────────
     #  TAB SWITCH — live price fetch when Trades tab opened
     # ─────────────────────────────────────────────────────────
     def _on_tab_changed(self, index):
-        if self._tabs_widget.tabText(index).startswith("💰"):
+        tab_text = self._tabs_widget.tabText(index)
+        if tab_text.startswith("💰"):
+            # Switched to Trades tab — trigger immediate refresh
             self._fetch_open_trade_prices()
 
     def _fetch_open_trade_prices(self):
-        """Fetch current prices for open trades into self._live_prices dict.
-        Never touches self._results so sorting/rendering never breaks."""
-        open_syms = list({t["symbol"] for t in self._trades if t["status"] == "OPEN"})
-        if not open_syms:
+        """Fetch current prices for open trades every 3s.
+        Also drives real-time TP/SL detection and order execution —
+        independent of the main scan interval.
+        Guard against concurrent calls."""
+        if getattr(self, '_trade_price_fetch_running', False):
+            return
+        open_trades = [t for t in self._trades if t["status"] == "OPEN"]
+        if not open_trades:
             return
 
-        self.statusBar().showMessage("Fetching live prices for open trades…")
+        open_syms = list({t["symbol"] for t in open_trades})
+        self._trade_price_fetch_running = True
 
         def _worker():
             try:
-                data = api_get("/api/v3/ticker/price")
-                price_map = {d["symbol"]: float(d["price"]) for d in data}
+                # One lightweight call per open symbol
+                base = CFG["base_url"]
                 for sym in open_syms:
-                    p = price_map.get(sym)
-                    if p is not None:
-                        self._live_prices[sym] = p
-                # Also update price inside any existing scan results (safe — key always exists)
+                    try:
+                        resp = requests.get(
+                            f"{base}/api/v3/ticker/price",
+                            params={"symbol": sym},
+                            timeout=5
+                        )
+                        d = resp.json()
+                        if isinstance(d, dict) and "price" in d:
+                            self._live_prices[sym] = float(d["price"])
+                    except Exception:
+                        pass
+                # Mirror into scan results
                 for r in self._results:
                     if r["symbol"] in self._live_prices:
                         r["price"] = self._live_prices[r["symbol"]]
@@ -2947,9 +3900,9 @@ class CryptoScannerWindow(QMainWindow):
                 pass
 
         def _done():
+            self._trade_price_fetch_running = False
             self._check_sltp_hits(self._results)
             self._refresh_trades_table()
-            self.statusBar().showMessage("Live prices updated for open trades")
 
         t = threading.Thread(target=_worker, daemon=True)
         t.start()
@@ -2964,7 +3917,20 @@ class CryptoScannerWindow(QMainWindow):
     #  AUTO SL/TP HIT DETECTION
     # ─────────────────────────────────────────────────────────
     def _check_sltp_hits(self, results):
-        """Called after every scan. Auto-closes open trades whose SL or TP has been crossed."""
+        """Called after every scan.
+        Wrapped in try/except — a crash here must never stop the app."""
+        try:
+            self._check_sltp_hits_inner(results)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.statusBar().showMessage(f"⚠ SL/TP check error: {str(e)[:60]}")
+
+    def _check_sltp_hits_inner(self, results):
+        """Called after every scan. Auto-closes open trades whose SL or TP has been crossed.
+        TP hit: app places market SELL + cancels OCO.
+        SL hit: OCO handles it on Binance — app just records it.
+        """
         price_map = {r["symbol"]: r["price"] for r in results}
         price_map.update(getattr(self, "_live_prices", {}))
         hits = []
@@ -2972,54 +3938,91 @@ class CryptoScannerWindow(QMainWindow):
         for trade in self._trades:
             if trade["status"] != "OPEN":
                 continue
-            sym   = trade["symbol"]   # full e.g. PENGUSDT
+            sym   = trade["symbol"]
             price = price_map.get(sym)
             if price is None:
                 continue
 
-            side  = trade["side"]
-            entry = trade["entry"]
-            sl    = trade.get("sl")
-            tp    = trade.get("tp")
+            side     = trade["side"]
+            sl       = trade.get("sl")
+            tp       = trade.get("tp")
             hit_type = None
 
             if side == "LONG":
-                if sl and price <= sl:
-                    hit_type = "SL"
-                elif tp and price >= tp:
-                    hit_type = "TP"
-            else:  # SHORT
-                if sl and price >= sl:
-                    hit_type = "SL"
-                elif tp and price <= tp:
-                    hit_type = "TP"
+                if sl and price <= sl:   hit_type = "SL"
+                elif tp and price >= tp: hit_type = "TP"
+            else:
+                if sl and price >= sl:   hit_type = "SL"
+                elif tp and price <= tp: hit_type = "TP"
 
             if hit_type:
                 hits.append((trade, hit_type, price))
 
         for trade, hit_type, price in hits:
-            # Auto-close
-            side  = trade["side"]
-            entry = trade["entry"]
-            qty   = trade.get("qty", 0)
+            side        = trade["side"]
+            entry       = trade["entry"]
+            qty         = trade.get("qty", 0)
+            symbol_full = trade["symbol"]
+            sym_short   = symbol_full.replace("USDT", "")
+            oco_id      = trade.get("binance_oco_id")
+            order_id    = trade.get("binance_order_id")
+            api_ready   = bool(TRADING_CFG["api_key"] and TRADING_CFG["api_secret"])
+            exit_price  = price
+
+            if hit_type == "TP" and api_ready and order_id is not None:
+                # Cancel OCO then place market SELL
+                if oco_id is not None:
+                    _trader.cancel_oco(symbol_full, oco_id)
+
+                # Round to step size so qty exactly matches Binance holdings
+                _, s_info = _trader.get_symbol_info(symbol_full)
+                sell_qty = _trader.round_step(qty, s_info.get("stepSize", 0.00000001))
+                s_ok, s_data = _trader.place_market_sell(symbol_full, sell_qty)
+                if not s_ok and "-2010" in str(s_data):
+                    # Retry with actual balance
+                    asset = symbol_full.replace("USDT", "")
+                    _, actual_bal = _trader.get_asset_balance(asset)
+                    if actual_bal > 0:
+                        _, s_info = _trader.get_symbol_info(symbol_full)
+                        sell_qty = _trader.round_step(actual_bal, s_info.get("stepSize", 1))
+                        s_ok, s_data = _trader.place_market_sell(symbol_full, sell_qty)
+                if s_ok:
+                    fills    = s_data.get("fills", [])
+                    exec_qty = float(s_data.get("executedQty", qty))
+                    if fills and exec_qty > 0:
+                        exit_price = sum(
+                            float(f["price"]) * float(f["qty"]) for f in fills
+                        ) / exec_qty
+                    qty = exec_qty
+                else:
+                    err = s_data.get("error", str(s_data))[:80]
+                    self.statusBar().showMessage(
+                        f"⚠ TP SELL FAILED for {sym_short}: {err}")
+                    continue  # don't close in journal if sell failed
+
+            elif hit_type == "SL" and api_ready and oco_id is not None:
+                # OCO already handled this on Binance — just record in journal
+                pass
+
+            # P&L
             if side == "LONG":
-                pnl = (price - entry) * qty
-                pct = (price - entry) / entry * 100
+                pnl = (exit_price - entry) * qty
+                pct = (exit_price - entry) / entry * 100
             else:
-                pnl = (entry - price) * qty
-                pct = (entry - price) / entry * 100
+                pnl = (entry - exit_price) * qty
+                pct = (entry - exit_price) / entry * 100
 
-            trade["exit"]    = price
-            trade["pnl"]     = round(pnl, 8)
-            trade["pnl_pct"] = round(pct, 4)
-            trade["status"]  = "WIN" if pnl >= 0 else "LOSS"
-            trade["closed"]  = datetime.now().strftime("%m-%d %H:%M")
+            trade["exit"]         = round(exit_price, 8)
+            trade["pnl"]          = round(pnl, 8)
+            trade["pnl_pct"]      = round(pct, 4)
+            trade["status"]       = "WIN" if pnl >= 0 else "LOSS"
+            trade["closed"]       = datetime.now().strftime("%m-%d %H:%M")
             trade["close_reason"] = hit_type
+            self._log_trade_event(f"AUTO_{hit_type}", trade)
 
-            sym_short = trade["symbol"].replace("USDT", "")
             sign = "+" if pnl >= 0 else ""
             msg  = (f"{'🎯' if hit_type=='TP' else '🛑'}  {hit_type} HIT  {side} {sym_short}  "
-                    f"@ ${price:.6f}  P&L: {sign}{pnl:.4f} USDT ({sign}{pct:.2f}%)")
+                    f"@ ${exit_price:.6f}  P&L: {sign}{pnl:.4f} USDT ({sign}{pct:.2f}%)")
 
             # Status bar
             self.statusBar().showMessage(msg)
@@ -3096,7 +4099,6 @@ class CryptoScannerWindow(QMainWindow):
         lay.setContentsMargins(20, 16, 20, 16)
         lay.setSpacing(14)
 
-        # ── Auto-scan settings ────────────────────────
         auto_grp = QGroupBox("AUTO-SCAN & TRIGGER")
         aglay = QGridLayout(auto_grp)
         aglay.setSpacing(10)
@@ -3140,7 +4142,6 @@ class CryptoScannerWindow(QMainWindow):
                 lbl.widget().setStyleSheet(f"color:{DIM};")
         lay.addWidget(auto_grp)
 
-        # ── Notification channels ─────────────────────
         ch_grp = QGroupBox("NOTIFICATION CHANNELS")
         chlay = QVBoxLayout(ch_grp)
         chlay.setSpacing(8)
@@ -3189,7 +4190,6 @@ class CryptoScannerWindow(QMainWindow):
         chlay.addWidget(self.al_tg)
         chlay.addWidget(tg_frame)
 
-        # ── WhatsApp via PicoClaw ──────────────────────
         self.al_wa = QCheckBox("📱  WhatsApp  (via PicoClaw — scan QR once, alerts forever)")
         self.al_wa.setStyleSheet(f"color:{WHITE};")
         self.al_wa.setChecked(ALERT_CFG["whatsapp"])
@@ -3250,7 +4250,6 @@ class CryptoScannerWindow(QMainWindow):
 
         lay.addWidget(ch_grp)
 
-        # ── Buttons ───────────────────────────────────
         btn_row = QHBoxLayout()
         apply_btn = QPushButton("✓  Apply Alert Settings")
         apply_btn.clicked.connect(self._apply_alert_config)
@@ -3260,13 +4259,17 @@ class CryptoScannerWindow(QMainWindow):
         btn_row.addWidget(test_btn)
         lay.addLayout(btn_row)
 
-        # ── Alert history log ─────────────────────────
         log_grp = QGroupBox("ALERT HISTORY")
         loglay = QVBoxLayout(log_grp)
         loglay.setSpacing(4)
 
-        clear_btn = QPushButton("Clear Log")
-        clear_btn.setFixedWidth(90)
+        clear_btn = QPushButton("🗑  Clear Log")
+        clear_btn.setFixedHeight(28)
+        clear_btn.setFixedWidth(110)
+        clear_btn.setStyleSheet(
+            f"background:{CARD}; color:{DIM}; border:1px solid {BORDER}; "
+            f"border-radius:4px; font-size:11px; padding:0 10px;"
+        )
         clear_btn.clicked.connect(self._clear_alert_log)
         loglay.addWidget(clear_btn, alignment=Qt.AlignmentFlag.AlignRight)
 
@@ -3397,7 +4400,6 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         sym = alert["symbol"]
         col = GREEN if "BUY" in sig else RED
 
-        # ── Visual alerts ────────────────────────────────────────────── #
         self._flash_window(sig)                   # full-window color flash
         self._start_title_flash(sig, sym)         # taskbar / title bar flash
         self._update_status_alert(sig, sym)       # status bar stays colored
@@ -3445,17 +4447,30 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         count = self.alert_log_layout.count()
         self.alert_log_layout.insertWidget(count - 1, row_w)
 
+    def _on_alert_scan_started(self):
+        """Background scan just started — update button to show scanning state."""
+        if self._worker is None or not self._worker.isRunning():
+            self.scan_btn.setEnabled(False)
+            self.scan_btn.setText("⏳  Scanning...")
+            self.progress.setVisible(True)
+            self.progress.setRange(0, 0)  # indeterminate spinner
+
     def _on_alert_scan_done(self, results):
         """Background alert scan completed — update table silently if no manual scan running."""
         if self._worker is None or not self._worker.isRunning():
             self._results = results
             self._refresh_display()
             self._populate_picks(results)
-            self._check_sltp_hits(results)     # auto-close SL/TP hit trades
-            self._refresh_trades_table()       # update unrealised P&L on open trades
+            self._check_sltp_hits(results)
+            self._refresh_trades_table()
+            self._refresh_balance_display()
             n = len(results)
             self.statusBar().showMessage(
                 f"Auto-scan: {n} coins  [{datetime.now().strftime('%H:%M:%S')}]")
+            self.scan_btn.setEnabled(True)
+            self.scan_btn.setText("⚡  SCAN")
+            self.progress.setRange(0, 100)
+            self.progress.setVisible(False)
 
     def _clear_alert_log(self):
         self._alert_log.clear()
@@ -3688,58 +4703,81 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
     # ------------------------------------------------------------------ #
 
     def _build_config_tab(self):
+        # Wrap everything in a scroll area so content never clips on small windows
+        outer = QWidget()
+        outer_lay = QVBoxLayout(outer)
+        outer_lay.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.setContentsMargins(20, 20, 20, 20)
         lay.setSpacing(16)
 
+        def _cfg_grid(parent):
+            """Grid with fixed label column + stretching widget column."""
+            g = QGridLayout(parent)
+            g.setSpacing(12)
+            g.setColumnMinimumWidth(0, 160)
+            g.setColumnStretch(0, 0)
+            g.setColumnStretch(1, 1)
+            return g
+
         # Filter settings
         filter_grp = QGroupBox("SCAN FILTERS")
-        flay = QGridLayout(filter_grp)
-        flay.setSpacing(12)
+        flay = _cfg_grid(filter_grp)
 
         self.cfg_max_price = QDoubleSpinBox()
-        self.cfg_max_price.setRange(0.01, 100); self.cfg_max_price.setValue(CFG["max_price"])
-        self.cfg_max_price.setPrefix("$"); self.cfg_max_price.setDecimals(2)
+        self.cfg_max_price.setRange(0.01,100); self.cfg_max_price.setDecimals(2)
+        self.cfg_max_price.setPrefix("$"); self.cfg_max_price.setValue(CFG["max_price"]); self.cfg_max_price.setFixedWidth(160)
 
         self.cfg_min_vol = QDoubleSpinBox()
-        self.cfg_min_vol.setRange(100000, 1e9); self.cfg_min_vol.setValue(CFG["min_volume_usdt"])
-        self.cfg_min_vol.setPrefix("$"); self.cfg_min_vol.setDecimals(0)
-        self.cfg_min_vol.setSingleStep(100000)
+        self.cfg_min_vol.setRange(100000,1e9); self.cfg_min_vol.setDecimals(0)
+        self.cfg_min_vol.setPrefix("$"); self.cfg_min_vol.setSingleStep(100000)
+        self.cfg_min_vol.setValue(CFG["min_volume_usdt"]); self.cfg_min_vol.setFixedWidth(160)
 
         self.cfg_interval = QComboBox()
+        self.cfg_interval.setFixedWidth(160)
         for iv in ["1m","3m","5m","15m","30m","1h"]:
             self.cfg_interval.addItem(iv)
         self.cfg_interval.setCurrentText(CFG["interval"])
 
         self.cfg_top_n = QSpinBox()
-        self.cfg_top_n.setRange(5, 100); self.cfg_top_n.setValue(CFG["top_n"])
+        self.cfg_top_n.setRange(5,100); self.cfg_top_n.setValue(CFG["top_n"]); self.cfg_top_n.setFixedWidth(160)
+
+        self.cfg_picks_n = QSpinBox()
+        self.cfg_picks_n.setRange(1,20); self.cfg_picks_n.setValue(CFG["picks_n"]); self.cfg_picks_n.setFixedWidth(160)
+        self.cfg_picks_n.setToolTip("Max cards shown per section in Top Picks tab")
 
         self.cfg_candles = QSpinBox()
-        self.cfg_candles.setRange(20, 200); self.cfg_candles.setValue(CFG["candle_limit"])
+        self.cfg_candles.setRange(20,200); self.cfg_candles.setValue(CFG["candle_limit"]); self.cfg_candles.setFixedWidth(160)
 
         rows = [
-            ("Max Price ($)",      self.cfg_max_price),
-            ("Min Volume (USDT)",  self.cfg_min_vol),
-            ("Interval",           self.cfg_interval),
-            ("Top N coins",        self.cfg_top_n),
-            ("Candles to fetch",   self.cfg_candles),
+            ("Max Price ($)",       self.cfg_max_price),
+            ("Min Volume (USDT)",   self.cfg_min_vol),
+            ("Interval",            self.cfg_interval),
+            ("Top N coins",         self.cfg_top_n),
+            ("Top Picks to show",   self.cfg_picks_n),
+            ("Candles to fetch",    self.cfg_candles),
         ]
         for i, (lbl, widget) in enumerate(rows):
             l = QLabel(lbl); l.setStyleSheet(f"color:{DIM};")
             flay.addWidget(l, i, 0)
-            flay.addWidget(widget, i, 1)
+            flay.addWidget(widget, i, 1, Qt.AlignmentFlag.AlignLeft)
 
         lay.addWidget(filter_grp)
 
         # Risk settings
         risk_grp = QGroupBox("RISK MANAGEMENT")
-        rlay = QGridLayout(risk_grp)
-        rlay.setSpacing(12)
+        rlay = _cfg_grid(risk_grp)
 
-        self.cfg_sl  = QDoubleSpinBox(); self.cfg_sl.setRange(0.5, 20); self.cfg_sl.setValue(CFG["sl_pct"]); self.cfg_sl.setSuffix("%")
-        self.cfg_tp  = QDoubleSpinBox(); self.cfg_tp.setRange(0.5, 50); self.cfg_tp.setValue(CFG["tp_pct"]); self.cfg_tp.setSuffix("%")
-        self.cfg_tp2 = QDoubleSpinBox(); self.cfg_tp2.setRange(1.0, 100); self.cfg_tp2.setValue(CFG["tp2_pct"]); self.cfg_tp2.setSuffix("%")
+        self.cfg_sl  = QDoubleSpinBox(); self.cfg_sl.setRange(0.5, 20); self.cfg_sl.setValue(CFG["sl_pct"]); self.cfg_sl.setSuffix("%"); self.cfg_sl.setFixedWidth(160)
+        self.cfg_tp  = QDoubleSpinBox(); self.cfg_tp.setRange(0.5, 50); self.cfg_tp.setValue(CFG["tp_pct"]); self.cfg_tp.setSuffix("%"); self.cfg_tp.setFixedWidth(160)
+        self.cfg_tp2 = QDoubleSpinBox(); self.cfg_tp2.setRange(1.0, 100); self.cfg_tp2.setValue(CFG["tp2_pct"]); self.cfg_tp2.setSuffix("%"); self.cfg_tp2.setFixedWidth(160)
 
         self.rr_lbl = QLabel()
         self._update_rr_label()
@@ -3754,22 +4792,21 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         for i, (lbl, widget) in enumerate(risk_rows):
             l = QLabel(lbl); l.setStyleSheet(f"color:{DIM};")
             rlay.addWidget(l, i, 0)
-            rlay.addWidget(widget, i, 1)
+            rlay.addWidget(widget, i, 1, Qt.AlignmentFlag.AlignLeft)
 
         rr_lbl_title = QLabel("R/R Ratio"); rr_lbl_title.setStyleSheet(f"color:{DIM};")
         rlay.addWidget(rr_lbl_title, len(risk_rows), 0)
         rlay.addWidget(self.rr_lbl, len(risk_rows), 1)
         lay.addWidget(risk_grp)
 
-        # ── UI Appearance ────────────────────────────────
         ui_grp = QGroupBox("UI APPEARANCE")
-        ulay   = QGridLayout(ui_grp)
-        ulay.setSpacing(12)
+        ulay   = _cfg_grid(ui_grp)
 
         self.cfg_font_size = QSpinBox()
         self.cfg_font_size.setRange(8, 20)
         self.cfg_font_size.setValue(FONT_SIZE)
         self.cfg_font_size.setSuffix(" px")
+        self.cfg_font_size.setFixedWidth(160)
         self.cfg_font_size.setToolTip("Base font size — all text scales proportionally")
 
         fs_lbl = QLabel("Font Size")
@@ -3778,11 +4815,10 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         fs_hint.setStyleSheet(f"color:{DIM}; font-size:10px;")
 
         ulay.addWidget(fs_lbl,            0, 0)
-        ulay.addWidget(self.cfg_font_size, 0, 1)
+        ulay.addWidget(self.cfg_font_size, 0, 1, Qt.AlignmentFlag.AlignLeft)
         ulay.addWidget(fs_hint,            1, 0, 1, 2)
         lay.addWidget(ui_grp)
 
-        # ── Alert Master Toggle ──────────────────────────
         alert_grp = QGroupBox("ALERTS")
         alay = QHBoxLayout(alert_grp)
         alay.setSpacing(12)
@@ -3798,7 +4834,6 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         alay.addStretch()
         lay.addWidget(alert_grp)
 
-        # ── Export ───────────────────────────────────────
         export_grp = QGroupBox("EXPORT SCAN RESULTS")
         elay = QHBoxLayout(export_grp)
 
@@ -3819,11 +4854,266 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         elay.addStretch()
         lay.addWidget(export_grp)
 
+        api_grp = QGroupBox("BINANCE API  —  TRADING")
+        api_grp.setStyleSheet(
+            f"QGroupBox {{ border:1px solid {YELLOW}; border-radius:6px; "
+            f"margin-top:8px; color:{YELLOW}; font-weight:700; }}"
+            f"QGroupBox::title {{ subcontrol-origin:margin; left:10px; padding:0 4px; }}"
+        )
+        aplay = QVBoxLayout(api_grp)
+        aplay.setSpacing(8)
+
+        # Testnet / Live toggle row
+        mode_row = QHBoxLayout()
+        self.cfg_testnet = QPushButton("🧪  TESTNET MODE  (safe)")
+        self.cfg_testnet.setCheckable(True)
+        self.cfg_testnet.setChecked(TRADING_CFG["testnet"])
+        self.cfg_testnet.setFixedHeight(32)
+        self._refresh_trading_mode_btn()
+        self.cfg_testnet.clicked.connect(self._on_trading_mode_toggle)
+        mode_row.addWidget(self.cfg_testnet)
+        mode_row.addStretch()
+        aplay.addLayout(mode_row)
+
+        # Warning label — shown only in live mode
+        self.cfg_live_warning = QLabel(
+            "⚠  LIVE MODE — real money at risk. "
+            "API key must have TRADE permission only. NO withdrawal permission.")
+        self.cfg_live_warning.setStyleSheet(
+            f"color:{RED}; font-size:11px; font-weight:700; padding:4px 0;")
+        self.cfg_live_warning.setWordWrap(True)
+        self.cfg_live_warning.setVisible(not TRADING_CFG["testnet"])
+        aplay.addWidget(self.cfg_live_warning)
+
+        # Key fields grid
+        key_grid = QGridLayout()
+        key_grid.setSpacing(8)
+        key_grid.setColumnMinimumWidth(0, 100)
+        key_grid.setColumnStretch(1, 1)
+
+        key_lbl = QLabel("API Key:")
+        key_lbl.setStyleSheet(f"color:{DIM}; font-size:11px;")
+        self.cfg_api_key = QLineEdit()
+        self.cfg_api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.cfg_api_key.setPlaceholderText("Paste your Binance API key here")
+        self.cfg_api_key.setText(TRADING_CFG["api_key"])
+
+        sec_lbl = QLabel("Secret:")
+        sec_lbl.setStyleSheet(f"color:{DIM}; font-size:11px;")
+        self.cfg_api_secret = QLineEdit()
+        self.cfg_api_secret.setEchoMode(QLineEdit.EchoMode.Password)
+        self.cfg_api_secret.setPlaceholderText("Paste your Binance API secret here")
+        self.cfg_api_secret.setText(TRADING_CFG["api_secret"])
+
+        # Show/hide toggle
+        show_btn = QPushButton("👁")
+        show_btn.setFixedSize(28, 28)
+        show_btn.setCheckable(True)
+        show_btn.setStyleSheet(
+            f"background:{CARD}; color:{DIM}; border:1px solid {BORDER}; border-radius:4px;")
+        show_btn.setToolTip("Show / hide keys")
+        def _toggle_echo(checked):
+            mode = QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+            self.cfg_api_key.setEchoMode(mode)
+            self.cfg_api_secret.setEchoMode(mode)
+        show_btn.toggled.connect(_toggle_echo)
+
+        key_grid.addWidget(key_lbl,              0, 0)
+        key_grid.addWidget(self.cfg_api_key,     0, 1)
+        key_grid.addWidget(show_btn,             0, 2, 2, 1)
+        key_grid.addWidget(sec_lbl,              1, 0)
+        key_grid.addWidget(self.cfg_api_secret,  1, 1)
+        aplay.addLayout(key_grid)
+
+        # OCO toggle
+        oco_row = QHBoxLayout()
+        self.cfg_oco = QCheckBox("Place OCO stop-loss on Binance after each buy")
+        self.cfg_oco.setChecked(TRADING_CFG["oco_enabled"])
+        self.cfg_oco.setStyleSheet(f"color:{DIM}; font-size:11px;")
+        self.cfg_oco.setToolTip(
+            "OCO = One-Cancels-the-Other order\n"
+            "Places a stop-loss directly on Binance — protects you even if the app is closed.\n"
+            "Disable to use in-app monitoring only.")
+        oco_row.addWidget(self.cfg_oco)
+        oco_row.addStretch()
+        aplay.addLayout(oco_row)
+
+        # Test connection button + result label
+        conn_row = QHBoxLayout()
+        self.cfg_conn_btn = QPushButton("🔌  Test Connection")
+        self.cfg_conn_btn.setFixedHeight(30)
+        self.cfg_conn_btn.setStyleSheet(
+            f"background:{CARD}; color:{ACCENT}; border:1px solid {ACCENT}; "
+            f"border-radius:4px; font-weight:700; padding:0 14px;")
+        self.cfg_conn_btn.clicked.connect(self._test_api_connection)
+        self.cfg_conn_lbl = QLabel("Not tested")
+        self.cfg_conn_lbl.setStyleSheet(f"color:{DIM}; font-size:11px;")
+        conn_row.addWidget(self.cfg_conn_btn)
+        conn_row.addSpacing(10)
+        conn_row.addWidget(self.cfg_conn_lbl)
+        conn_row.addStretch()
+        aplay.addLayout(conn_row)
+
+        lay.addWidget(api_grp)
+
+        browser_grp = QGroupBox("BROWSER")
+        blay = QHBoxLayout(browser_grp)
+        blay.setSpacing(8)
+
+        browser_lbl = QLabel("Browser path:")
+        browser_lbl.setStyleSheet(f"color:{DIM}; font-size:11px;")
+
+        self.cfg_browser = QLineEdit()
+        self.cfg_browser.setPlaceholderText(
+            "Leave empty for system default  (e.g. /usr/bin/firefox  or  /usr/bin/brave)")
+        self.cfg_browser.setText(BROWSER_PATH)
+        self.cfg_browser.setToolTip(
+            "Full path to browser binary. Leave empty to use xdg-open / system default.")
+
+        browse_btn = QPushButton("…")
+        browse_btn.setFixedWidth(32)
+        browse_btn.setFixedHeight(28)
+        browse_btn.setToolTip("Pick browser binary")
+        browse_btn.setStyleSheet(
+            f"background:{CARD}; color:{DIM}; border:1px solid {BORDER}; border-radius:4px;")
+        browse_btn.clicked.connect(self._pick_browser)
+
+        test_browser_btn = QPushButton("🌐  Test")
+        test_browser_btn.setFixedHeight(28)
+        test_browser_btn.setStyleSheet(
+            f"background:{CARD}; color:{ACCENT}; border:1px solid {ACCENT}; "
+            f"border-radius:4px; padding:0 10px;")
+        test_browser_btn.setToolTip("Open Binance in the configured browser")
+        test_browser_btn.clicked.connect(
+            lambda: open_url("https://www.binance.com"))
+
+        blay.addWidget(browser_lbl)
+        blay.addWidget(self.cfg_browser, 1)
+        blay.addWidget(browse_btn)
+        blay.addWidget(test_browser_btn)
+        lay.addWidget(browser_grp)
+
         apply_btn = QPushButton("✓  Apply Settings")
         apply_btn.clicked.connect(self._apply_config)
         lay.addWidget(apply_btn)
         lay.addStretch()
-        return w
+
+        scroll.setWidget(w)
+        outer_lay.addWidget(scroll)
+        return outer
+
+    def _pick_browser(self):
+        from PyQt6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Browser Binary", "/usr/bin",
+            "Executables (*)"
+        )
+        if path:
+            self.cfg_browser.setText(path)
+
+    def _refresh_balance_display(self):
+        """Fetch USDT balance in background and update the top bar label."""
+        if not TRADING_CFG["api_key"]:
+            self._balance_lbl.setText("💰 —")
+            return
+
+        self._balance_lbl.setText("💰 …")
+
+        class _BalFetch(QThread):
+            done = pyqtSignal(bool, float)
+            def run(self_):
+                ok, bal = _trader.get_usdt_balance()
+                self_.done.emit(ok, bal)
+
+        def _on_done(ok, bal):
+            if ok:
+                env = "T" if TRADING_CFG["testnet"] else "L"
+                self._balance_lbl.setText(f"💰 {bal:,.2f} USDT [{env}]")
+                col = GREEN if TRADING_CFG["testnet"] else RED
+                self._balance_lbl.setStyleSheet(
+                    f"color:{col}; font-family:{MONO_CSS}; font-size:11px; "
+                    f"font-weight:700; padding:0 8px;")
+            else:
+                self._balance_lbl.setText("💰 —")
+
+        self._bal_fetch_thread = _BalFetch()
+        self._bal_fetch_thread.done.connect(_on_done)
+        self._bal_fetch_thread.start()
+
+    def _refresh_trading_mode_btn(self):
+        """Update the testnet/live toggle button appearance."""
+        if not hasattr(self, 'cfg_testnet'):
+            return
+        if TRADING_CFG["testnet"]:
+            self.cfg_testnet.setText("🧪  TESTNET MODE  (safe)")
+            self.cfg_testnet.setStyleSheet(
+                f"background:#003a1a; color:{GREEN}; border:1px solid {GREEN}; "
+                f"border-radius:4px; font-size:12px; font-weight:700; padding:0 14px;")
+        else:
+            self.cfg_testnet.setText("🔴  LIVE MODE  — real money")
+            self.cfg_testnet.setStyleSheet(
+                f"background:#3a0000; color:{RED}; border:2px solid {RED}; "
+                f"border-radius:4px; font-size:12px; font-weight:700; padding:0 14px;")
+
+    def _on_trading_mode_toggle(self):
+        is_live = not self.cfg_testnet.isChecked()
+        if is_live:
+            reply = QMessageBox.warning(
+                self, "Switch to LIVE Trading",
+                "⚠  You are switching to LIVE mode.\n\n"
+                "Real money will be used for all trades.\n"
+                "Make sure your API key has TRADE permission only — NO withdrawal.\n\n"
+                "Are you sure?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                self.cfg_testnet.setChecked(True)
+                return
+        TRADING_CFG["testnet"] = self.cfg_testnet.isChecked()
+        self._refresh_trading_mode_btn()
+        self.cfg_live_warning.setVisible(not TRADING_CFG["testnet"])
+        self._refresh_live_banner()
+        mode = "TESTNET" if TRADING_CFG["testnet"] else "LIVE"
+        self.statusBar().showMessage(f"Trading mode switched to {mode}")
+        self.cfg_conn_lbl.setText("Not tested")
+
+    def _refresh_live_banner(self):
+        """Show/hide the red live mode banner in the main window title area."""
+        is_live = not TRADING_CFG["testnet"]
+        if hasattr(self, '_live_banner'):
+            self._live_banner.setVisible(is_live)
+
+    def _test_api_connection(self):
+        """Test connection button — runs in a thread so UI doesn't freeze."""
+        self.cfg_conn_btn.setEnabled(False)
+        self.cfg_conn_lbl.setText("Testing…")
+        self.cfg_conn_lbl.setStyleSheet(f"color:{DIM}; font-size:11px;")
+
+        # Save current key values first
+        TRADING_CFG["api_key"]    = self.cfg_api_key.text().strip()
+        TRADING_CFG["api_secret"] = self.cfg_api_secret.text().strip()
+        TRADING_CFG["oco_enabled"] = self.cfg_oco.isChecked()
+
+        class _ConnTest(QThread):
+            result = pyqtSignal(bool, str)
+            def run(self_):
+                ok, msg = _trader.test_connection()
+                self_.result.emit(ok, msg)
+
+        self._conn_thread = _ConnTest()
+        def _on_result(ok, msg):
+            self.cfg_conn_btn.setEnabled(True)
+            if ok:
+                self.cfg_conn_lbl.setText(msg)
+                self.cfg_conn_lbl.setStyleSheet(
+                    f"color:{GREEN}; font-size:11px; font-weight:700;")
+            else:
+                self.cfg_conn_lbl.setText(f"✗ {msg}")
+                self.cfg_conn_lbl.setStyleSheet(
+                    f"color:{RED}; font-size:11px; font-weight:700;")
+        self._conn_thread.result.connect(_on_result)
+        self._conn_thread.start()
 
     def _update_rr_label(self):
         rr = self.cfg_tp.value() / self.cfg_sl.value()
@@ -3840,6 +5130,7 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         CFG["min_volume_usdt"] = self.cfg_min_vol.value()
         CFG["interval"]        = self.cfg_interval.currentText()
         CFG["top_n"]           = self.cfg_top_n.value()
+        CFG["picks_n"]         = self.cfg_picks_n.value()
         CFG["candle_limit"]    = self.cfg_candles.value()
         CFG["sl_pct"]          = self.cfg_sl.value()
         CFG["tp_pct"]          = self.cfg_tp.value()
@@ -3852,12 +5143,30 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
             QApplication.instance().setStyleSheet(make_stylesheet(FONT_SIZE))
             self._settings.setValue("fontSize", FONT_SIZE)
 
+        # Browser path
+        global BROWSER_PATH
+        BROWSER_PATH = self.cfg_browser.text().strip()
+        self._settings.setValue("browserPath", BROWSER_PATH)
+
+        # Trading config
+        TRADING_CFG["api_key"]    = self.cfg_api_key.text().strip()
+        TRADING_CFG["api_secret"] = self.cfg_api_secret.text().strip()
+        TRADING_CFG["oco_enabled"] = self.cfg_oco.isChecked()
+        self._settings.setValue("tradingApiKey",    TRADING_CFG["api_key"])
+        self._settings.setValue("tradingApiSecret", TRADING_CFG["api_secret"])
+        self._settings.setValue("tradingTestnet",   TRADING_CFG["testnet"])
+        self._settings.setValue("tradingOco",       TRADING_CFG["oco_enabled"])
+
+        # Persist scan/picks counts
+        self._settings.setValue("topN",   CFG["top_n"])
+        self._settings.setValue("picksN", CFG["picks_n"])
+
         self.statusBar().showMessage(
             f"Config applied — font {FONT_SIZE}px  |  press Scan to refresh"
         )
 
     def _restore_settings(self):
-        global FONT_SIZE
+        global FONT_SIZE, BROWSER_PATH
         s = self._settings
 
         # Font size — restore first so stylesheet is correct before layout
@@ -3866,6 +5175,67 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
             FONT_SIZE = int(saved_fs)
             self.cfg_font_size.setValue(FONT_SIZE)
             QApplication.instance().setStyleSheet(make_stylesheet(FONT_SIZE))
+
+        # Browser path
+        saved_bp = s.value("browserPath")
+        if saved_bp is not None:
+            BROWSER_PATH = str(saved_bp)
+            self.cfg_browser.setText(BROWSER_PATH)
+
+        # Trading config
+        tk = s.value("tradingApiKey")
+        ts = s.value("tradingApiSecret")
+        tt = s.value("tradingTestnet")
+        to = s.value("tradingOco")
+        if tk is not None:
+            TRADING_CFG["api_key"] = str(tk)
+            self.cfg_api_key.setText(TRADING_CFG["api_key"])
+        if ts is not None:
+            TRADING_CFG["api_secret"] = str(ts)
+            self.cfg_api_secret.setText(TRADING_CFG["api_secret"])
+        if tt is not None:
+            TRADING_CFG["testnet"] = tt in (True, "true", "True", "1")
+            self.cfg_testnet.setChecked(TRADING_CFG["testnet"])
+            self._refresh_trading_mode_btn()
+            self.cfg_live_warning.setVisible(not TRADING_CFG["testnet"])
+            self._refresh_live_banner()
+        if to is not None:
+            TRADING_CFG["oco_enabled"] = to in (True, "true", "True", "1")
+            self.cfg_oco.setChecked(TRADING_CFG["oco_enabled"])
+
+        # Final sync — always pull from widgets into TRADING_CFG
+        # This guarantees TRADING_CFG is current even if QSettings keys differ
+        try:
+            TRADING_CFG["api_key"]    = self.cfg_api_key.text().strip()
+            TRADING_CFG["api_secret"] = self.cfg_api_secret.text().strip()
+        except Exception:
+            pass
+
+        # Restore all CFG spinbox values
+        def _load(key, widget, cast, cfg_key=None):
+            v = s.value(key)
+            if v is not None:
+                try:
+                    val = cast(v)
+                    widget.setValue(val) if hasattr(widget, 'setValue') else widget.setCurrentText(val)
+                    if cfg_key:
+                        CFG[cfg_key] = val
+                except Exception:
+                    pass
+
+        _load("topN",     self.cfg_top_n,     int,   "top_n")
+        _load("picksN",   self.cfg_picks_n,   int,   "picks_n")
+        _load("maxPrice", self.cfg_max_price, float, "max_price")
+        _load("minVol",   self.cfg_min_vol,   float, "min_volume_usdt")
+        _load("candles",  self.cfg_candles,   int,   "candle_limit")
+        _load("slPct",    self.cfg_sl,        float, "sl_pct")
+        _load("tpPct",    self.cfg_tp,        float, "tp_pct")
+        _load("tp2Pct",   self.cfg_tp2,       float, "tp2_pct")
+
+        iv = s.value("interval")
+        if iv is not None:
+            self.cfg_interval.setCurrentText(str(iv))
+            CFG["interval"] = str(iv)
 
         # Window geometry
         geo = s.value("geometry")
@@ -3927,6 +5297,25 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         s.setValue("geometry",    self.saveGeometry())
         s.setValue("windowState", self.saveState())
         s.setValue("fontSize",    FONT_SIZE)
+        s.setValue("browserPath", BROWSER_PATH)
+        # Trading config
+        s.setValue("tradingApiKey",    TRADING_CFG["api_key"])
+        s.setValue("tradingApiSecret", TRADING_CFG["api_secret"])
+        s.setValue("tradingTestnet",   TRADING_CFG["testnet"])
+        s.setValue("tradingOco",       TRADING_CFG["oco_enabled"])
+        # Save all CFG spinbox values directly from widgets (no Apply click needed)
+        try:
+            s.setValue("topN",    self.cfg_top_n.value())
+            s.setValue("picksN",  self.cfg_picks_n.value())
+            s.setValue("maxPrice",  self.cfg_max_price.value())
+            s.setValue("minVol",    self.cfg_min_vol.value())
+            s.setValue("interval",  self.cfg_interval.currentText())
+            s.setValue("candles",   self.cfg_candles.value())
+            s.setValue("slPct",     self.cfg_sl.value())
+            s.setValue("tpPct",     self.cfg_tp.value())
+            s.setValue("tp2Pct",    self.cfg_tp2.value())
+        except Exception:
+            pass
         s.sync()
 
     def _refresh_alert_toggle(self):
@@ -3981,12 +5370,18 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
 
     def closeEvent(self, event):
         self._alert_engine.stop()
+        self._trades_refresh_timer.stop()
         self._save_settings()
         super().closeEvent(event)
 
     def _setup_timer(self):
         self._progress_timer = QTimer()
         self._progress_timer.timeout.connect(self._poll_progress)
+
+        # Trades tab live price refresh — fires every 3s always
+        self._trades_refresh_timer = QTimer()
+        self._trades_refresh_timer.setInterval(3000)
+        self._trades_refresh_timer.timeout.connect(self._fetch_open_trade_prices)
 
     def _start_scan(self):
         if self._worker and self._worker.isRunning():
@@ -3996,7 +5391,7 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         self.progress.setVisible(True)
         self.progress.setValue(0)
         self.table.setRowCount(0)
-        self.status_lbl.setText("Fetching tickers...")
+        self.statusBar().showMessage("Fetching tickers...")
 
         self._scanner = Scanner()
         self._worker  = ScanWorker(self._scanner)
@@ -4009,7 +5404,7 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         if total > 0:
             self.progress.setMaximum(total)
             self.progress.setValue(done)
-        self.status_lbl.setText(status[:80])
+        self.statusBar().showMessage(status[:80])
 
     def _poll_progress(self):
         pass
@@ -4020,12 +5415,13 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         self._populate_picks(results)
         self._check_sltp_hits(results)     # auto-close SL/TP hit trades
         self._refresh_trades_table()       # update unrealised P&L
+        self._refresh_balance_display()    # update balance in top bar
         self.scan_btn.setEnabled(True)
         self.scan_btn.setText("⚡  SCAN")
         self.progress.setVisible(False)
-        # export moved to config tab
+     
         n = len(results)
-        self.status_lbl.setText(f"Done — {n} coins  [{datetime.now().strftime('%H:%M:%S')}]")
+        self.statusBar().showMessage(f"Done — {n} coins  [{datetime.now().strftime('%H:%M:%S')}]")
         self._clear_status_alert()
         self.statusBar().showMessage(f"Scan complete — {n} coins analysed")
 
@@ -4047,7 +5443,7 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         self.scan_btn.setEnabled(True)
         self.scan_btn.setText("⚡  SCAN")
         self.progress.setVisible(False)
-        self.status_lbl.setText(f"Error: {msg[:60]}")
+        self.statusBar().showMessage(f"Error: {msg[:60]}")
         self.statusBar().showMessage(f"Error: {msg}")
 
     # col index → function that extracts a numeric sort key from a result dict
@@ -4104,6 +5500,12 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
                 self.table.horizontalHeaderItem(i).setText(base)
 
     def _populate_table(self, results):
+        try:
+            self._do_populate_table(results)
+        except Exception as e:
+            import traceback; traceback.print_exc()
+
+    def _do_populate_table(self, results):
         self.table.setRowCount(0)
 
         for idx, r in enumerate(results):
@@ -4249,7 +5651,6 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         if self._sort_col is not None:
             self._update_header_arrows()
 
-
     def _populate_picks(self, results):
         # Clear picks tab
         while self.picks_lay.count():
@@ -4257,8 +5658,9 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
             if item.widget():
                 item.widget().deleteLater()
 
-        buys  = [r for r in results if "BUY"  in r["signal"]]
-        sells = [r for r in results if "SELL" in r["signal"]]
+        n     = CFG.get("picks_n", 5)
+        buys  = [r for r in results if "BUY"  in r["signal"]][:n]
+        sells = [r for r in results if "SELL" in r["signal"]][:n]
 
         for section_name, section_results, color in [
             ("🟢  LONG CANDIDATES", buys,  GREEN),
@@ -4356,7 +5758,7 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         class PickCard(QWidget):
             def __init__(self_):
                 super().__init__()
-                self_.setMinimumHeight(148)
+                self_.setMinimumHeight(160)
                 self_.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
             def paintEvent(self_, event):
@@ -4364,7 +5766,6 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
                 p.setRenderHint(QPainter.RenderHint.Antialiasing)
                 W, H = self_.width(), self_.height()
 
-                # ── Card background + border ──────────────────
                 p.setPen(QPen(QColor(BORDER), 1))
                 p.setBrush(QBrush(QColor(CARD)))
                 p.drawRoundedRect(1, 1, W-2, H-2, 7, 7)
@@ -4455,14 +5856,17 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
                 p.drawText(exp_x, ry, exp_w, ROW_H,
                            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, exp_str)
 
-                # 24h% right-aligned
+                # 24h% right-aligned — row 1, measure first so row 2 knows safe right edge
                 chg_col = GREEN if chg24 >= 0 else RED
+                p.setFont(f_med)
+                chg_w = p.fontMetrics().horizontalAdvance(chg_str) + 6
+                chg_x = W - chg_w - 8
                 p.setPen(QColor(chg_col))
-                p.drawText(W - chg_w - 8, ry, chg_w, ROW_H,
+                p.drawText(chg_x, ry, chg_w, ROW_H,
                            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, chg_str)
 
                 # ════════════════════════════════════════════
-                # ROW 2  — Score bar | RSI bar | BB bar | 1H | Conf | Age
+                # ROW 2  — Score bar | RSI bar | BB bar | Age (right)
                 # ════════════════════════════════════════════
                 y2 = ry + ROW_H + 4
                 bar_h = 6
@@ -4472,10 +5876,8 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
                 score_w = 90
                 txt(L, y2, "Score", DIM, 8)
                 bx = L + 38
-                # background
                 p.setBrush(QBrush(QColor(DARK2))); p.setPen(Qt.PenStyle.NoPen)
                 p.drawRoundedRect(bx, y2+2, score_w, bar_h, bar_r, bar_r)
-                # fill
                 fill_w = int(min(win_sc, 10) / 10 * score_w)
                 p.setBrush(QBrush(QColor(accent)))
                 p.drawRoundedRect(bx, y2+2, max(fill_w, 4), bar_h, bar_r, bar_r)
@@ -4503,26 +5905,25 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
                 p.drawRoundedRect(bbx, y2+2, int(bb_pct/100*60), bar_h, bar_r, bar_r)
                 txt(bbx+63, y2, f"{bb_pct:.0f}", bb_col, 8, bold=True)
 
-                # Right side: 1H trend | CONF | AGE
-                rx = W - 10
-                # Age
-                age_label = f"Age: {age_str}"
-                txt(0, y2, age_label, age_col, 8, bold=True,
-                    align=Qt.AlignmentFlag.AlignRight|Qt.AlignmentFlag.AlignTop, w=rx)
-                # Conf bar above age
-                conf_label = f"Conf: {conf_bar}"
-                # 1H
-                trend_label = f"1H: {trend_sym}"
-                # Stack them right-aligned
+                # Right side of Row 2: Age stacked above Conf — anchored to right edge
+                # measure both
                 f_sm = QFont(); f_sm.setPointSize(8); p.setFont(f_sm)
-                cw = p.fontMetrics().horizontalAdvance(conf_label) + 8
-                tw = p.fontMetrics().horizontalAdvance(trend_label) + 8
-                aw = p.fontMetrics().horizontalAdvance(age_label) + 8
-                max_rw = max(cw, tw, aw)
-                rx2 = W - max_rw - 6
+                fm_sm = p.fontMetrics()
+                age_label  = f"Age: {age_str}"
+                conf_label = f"Conf: {conf_bar}"
+                aw = fm_sm.horizontalAdvance(age_label)
+                cw = fm_sm.horizontalAdvance(conf_label)
+                right_col_w = max(aw, cw) + 4
+                rx2 = W - right_col_w - 8
 
-                txt(rx2, y2, conf_label, conf_col, 8,
-                    align=Qt.AlignmentFlag.AlignLeft|Qt.AlignmentFlag.AlignTop)
+                # Age on top line of row 2
+                p.setPen(QColor(age_col))
+                p.drawText(rx2, y2, right_col_w, 14,
+                           Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, age_label)
+                # Conf below age
+                p.setPen(QColor(conf_col))
+                p.drawText(rx2, y2 + 14, right_col_w, 14,
+                           Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, conf_label)
 
                 # ════════════════════════════════════════════
                 # ROW 3  — Trade setup pills
@@ -4559,14 +5960,11 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
                     p.drawText(px, y3+16, pw, 16, Qt.AlignmentFlag.AlignCenter, pval)
                     px += pw + 5
 
-                # 1H and vol right of pills
-                txt(0, y3+8, f"1H {trend_sym}  Vol {vol_r:.1f}x  {pattern}",
-                    DIM, 9,
-                    align=Qt.AlignmentFlag.AlignRight|Qt.AlignmentFlag.AlignTop,
-                    w=W-8)
+                # 1H and vol right of pills — drawn BELOW pills in row 4, not overlapping
+                # (removed from row 3)
 
                 # ════════════════════════════════════════════
-                # ROW 4  — MACD direction + StRSI + Vol ratio bar
+                # ROW 4  — MACD | StRSI | 1H trend | Vol bar
                 # ════════════════════════════════════════════
                 y4 = y3 + pill_h + 6
                 macd_str  = f"MACD {'▲ Positive' if macd_h > 0 else '▼ Negative'}  ({macd_h:+.4f})"
@@ -4578,25 +5976,43 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
                 mx = L + txt_w(macd_str, 9, bold=True) + 14
                 txt(mx, y4, strsi_str, strsi_col, 9, bold=True)
 
-                # Vol ratio mini bar far right
+                # 1H trend | Vol bar — right side of row 4, no overlap
+                # 1H trend label
+                trend_label = f"1H {trend_sym}  Vol"
+                tl_w = txt_w(trend_label, 9) + 4
+
                 vol_bar_w = 50
-                vbx = W - vol_bar_w - 8
-                txt(vbx - 28, y4, "Vol", DIM, 8)
+                gap = 6
+                # total right block width: trend_label + gap + vol_bar + gap + vol_value
+                f_sm2 = QFont(); f_sm2.setPointSize(8); p.setFont(f_sm2)
+                vol_val_str = f"{vol_r:.1f}x"
+                vvw = p.fontMetrics().horizontalAdvance(vol_val_str) + 4
+
+                right_block_x = W - tl_w - gap - vol_bar_w - gap - vvw - 8
+
+                # 1H trend
+                p.setFont(QFont())
+                txt(right_block_x, y4, f"1H {trend_sym}", trend_col, 9)
+                tl_actual = txt_w(f"1H {trend_sym}", 9) + 6
+                txt(right_block_x + tl_actual, y4, "Vol", DIM, 9)
+                vol_lbl_w = txt_w("Vol", 9) + 4
+
+                vbx = right_block_x + tl_actual + vol_lbl_w
                 p.setBrush(QBrush(QColor(DARK2))); p.setPen(Qt.PenStyle.NoPen)
-                p.drawRoundedRect(vbx, y4+2, vol_bar_w, bar_h, bar_r, bar_r)
+                p.drawRoundedRect(vbx, y4+3, vol_bar_w, bar_h, bar_r, bar_r)
                 vol_fill = min(int((vol_r / 5) * vol_bar_w), vol_bar_w)
                 vol_col = "#00ff88" if vol_r >= 2 else (YELLOW if vol_r >= 1.2 else DIM)
                 p.setBrush(QBrush(QColor(vol_col)))
-                p.drawRoundedRect(vbx, y4+2, max(vol_fill,3), bar_h, bar_r, bar_r)
-                txt(vbx + vol_bar_w + 3, y4, f"{vol_r:.1f}x", vol_col, 8, bold=True)
+                p.drawRoundedRect(vbx, y4+3, max(vol_fill, 3), bar_h, bar_r, bar_r)
+                txt(vbx + vol_bar_w + 3, y4, vol_val_str, vol_col, 8, bold=True)
 
             def sizeHint(self_):
                 from PyQt6.QtCore import QSize
-                return QSize(500, 148)
+                return QSize(500, 160)
 
             def minimumSizeHint(self_):
                 from PyQt6.QtCore import QSize
-                return QSize(400, 148)
+                return QSize(400, 160)
 
         return PickCard()
     def _on_row_double_click(self, item):
@@ -4619,7 +6035,6 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         dlg.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         dlg.setModal(False)
 
-        # ── Outer frame ────────────────────────────────
         outer = QFrame(dlg)
         outer.setObjectName("detailPopup")
         outer.setStyleSheet(f"""
@@ -4638,7 +6053,6 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         main_lay.setContentsMargins(0, 0, 0, 0)
         main_lay.setSpacing(0)
 
-        # ── Title bar ──────────────────────────────────
         title_bar = QFrame()
         title_bar.setFixedHeight(42)
         title_bar.setStyleSheet(f"background: {accent}22; border-radius: 10px 10px 0 0;")
@@ -4678,18 +6092,15 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         tb_lay.addWidget(close_btn)
         main_lay.addWidget(title_bar)
 
-        # ── Scrollable detail content ──────────────────
         detail_panel = DetailPanel()
         detail_panel.load(r)
         main_lay.addWidget(detail_panel)
 
-        # ── Hint footer ────────────────────────────────
         hint = QLabel("Right-click row in Scanner to open a trade  |  Click outside or Esc to close")
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         hint.setStyleSheet(f"color:{DIM}; font-size:10px; padding:6px; background:transparent;")
         main_lay.addWidget(hint)
 
-        # ── Size and position ──────────────────────────
         mw = self.geometry()
         w  = max(700, int(mw.width()  * 0.55))
         h  = max(600, int(mw.height() * 0.80))
@@ -4699,10 +6110,8 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
             mw.y() + (mw.height() - h) // 2
         )
 
-        # ── Close on Escape ────────────────────────────
         QShortcut(QKeySequence("Escape"), dlg).activated.connect(dlg.accept)
 
-        # ── Close on click outside — app-level event filter ──
         # Any mouse press that lands outside dlg's geometry closes it.
         class _OutsideClickFilter(QObject):
             def eventFilter(self_, obj, event):
@@ -4741,15 +6150,42 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
 # ─────────────────────────────────────────────────────────────
 #  ENTRY POINT
 # ─────────────────────────────────────────────────────────────
+def _global_exception_handler(exc_type, exc_value, exc_tb):
+    """Catch any unhandled exception and log it to file."""
+    import traceback, datetime
+    log_path = os.path.expanduser("~/.crypto_scanner_crash.log")
+    try:
+        with open(log_path, "a") as f:
+            f.write(f"\n{'='*60}\n")
+            f.write(f"CRASH: {datetime.datetime.now()}\n")
+            traceback.print_exception(exc_type, exc_value, exc_tb, file=f)
+        print(f"[CRASH LOGGED] → {log_path}")
+    except Exception:
+        pass
+    sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+
 def main():
     # Suppress Qt stderr noise about missing dbus portal and unknown CSS properties.
     # These are harmless Qt/desktop-environment warnings, not Python errors.
     os.environ.setdefault("QT_LOGGING_RULES",
         "qt.qpa.theme=false;qt.qpa.theme.gnome=false")
 
+    sys.excepthook = _global_exception_handler
     app = QApplication(sys.argv)
     app.setApplicationName("Crypto Scalper Scanner")
     app.setStyleSheet(make_stylesheet(FONT_SIZE))
+
+    # Set app icon early so it shows in taskbar, dock and alt-tab
+    import os as _os
+    for _p in [
+        _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "app_icon.png"),
+        _os.path.join(_os.getcwd(), "app_icon.png"),
+        _os.path.join(_os.path.dirname(_os.path.abspath(sys.argv[0])), "app_icon.png"),
+    ]:
+        if _os.path.exists(_p):
+            app.setWindowIcon(QIcon(_p))
+            break
 
     # Set dark palette
     palette = QPalette()

@@ -20,6 +20,7 @@ echo -e "${CYAN}Repo: $REPO_DIR${RESET}"
 # ── Files always included ────────────────────────────────────
 CORE_FILES=(
     crypto_scanner.py
+    app_icon.png
     push_release.sh
     requirements.txt
 )
@@ -28,12 +29,11 @@ CORE_FILES=(
 DOC_FILES=(
     README.md
     tutorial.html
-    crypto_scanner_guide.pdf
     crypto_scanner_guide.odt
 )
 
 # ── Ask for version ──────────────────────────────────────────
-read -p "Enter version number (e.g. 1.3.2): " VERSION
+read -p "Enter version number (e.g. 2.0.0): " VERSION
 TAG="v$VERSION"
 
 if git tag | grep -q "^$TAG$"; then
@@ -44,6 +44,19 @@ fi
 # ── Ask for commit message ───────────────────────────────────
 read -p "Commit message (or Enter for 'release $TAG'): " MSG
 MSG="${MSG:-release $TAG}"
+
+# ── Update APP_VERSION in crypto_scanner.py ─────────────────
+echo ""
+CURRENT_VER=$(grep -oP '(?<=APP_VERSION = ").*(?=")' crypto_scanner.py)
+echo -e "${BOLD}Current APP_VERSION:${RESET} ${YELLOW}$CURRENT_VER${RESET}"
+
+if [[ "$CURRENT_VER" != "$VERSION" ]]; then
+    read -p "Update APP_VERSION to $VERSION in crypto_scanner.py? (y/n): " UPDATE_VER
+    if [[ "$UPDATE_VER" == "y" ]]; then
+        sed -i "s/APP_VERSION = \".*\"/APP_VERSION = \"$VERSION\"/" crypto_scanner.py
+        echo -e "  ${GREEN}✓${RESET} APP_VERSION updated to $VERSION"
+    fi
+fi
 
 # ── Stage core files ─────────────────────────────────────────
 echo ""
