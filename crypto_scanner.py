@@ -21,6 +21,11 @@ import subprocess
 import statistics
 import threading
 import requests
+try:
+    import websocket as _websocket
+    _WS_AVAILABLE = True
+except ImportError:
+    _WS_AVAILABLE = False
 from datetime import datetime
 
 from PyQt6.QtWidgets import (
@@ -46,7 +51,27 @@ try:
 except ImportError:
     HAS_CHARTS = False
 
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.2.0"
+
+# ─────────────────────────────────────────────────────────────
+#  CROSS-PLATFORM DATA DIRECTORY
+#  Linux:   ~/.config/CryptoScalper/
+#  Windows: %APPDATA%/CryptoScalper/
+#  macOS:   ~/Library/Application Support/CryptoScalper/
+# ─────────────────────────────────────────────────────────────
+def _get_app_data_dir() -> str:
+    import platform
+    system = platform.system()
+    if system == "Windows":
+        base = os.environ.get("APPDATA", os.path.expanduser("~"))
+    elif system == "Darwin":
+        base = os.path.expanduser("~/Library/Application Support")
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+    return os.path.join(base, "CryptoScalper")
+
+APP_DATA_DIR  = _get_app_data_dir()
+APP_LOGS_DIR  = os.path.join(APP_DATA_DIR, "logs")
 
 # ─────────────────────────────────────────────────────────
 #  CONFIG  (edit these to change scan behaviour)
@@ -530,9 +555,34 @@ def analyse(symbol, raw_klines, change_24h=0.0):
     if bbu and bbl and closes[-1] > 0:
         bb_width_pct = (bbu - bbl) / closes[-1] * 100
 
+    # ADR — Average Daily Range over last 10 candles (as % of price)
+    # Measures how much the coin typically moves per candle
+    # Low ADR = flat/choppy coin not worth trading
+    adr_pct = 0.0
+    if len(candles) >= 5 and closes[-1] > 0:
+        recent = candles[-10:]
+        ranges = [(c["high"] - c["low"]) / c["close"] * 100
+                  for c in recent if c["close"] > 0]
+        adr_pct = round(statistics.mean(ranges), 2) if ranges else 0.0
+
     signal, sig_clr, long_sc, short_sc = score_signal(
         rsi, mh, closes[-1], bbu, bbl, bbm, pattern, change_24h, stoch_rsi,
         vol_ratio=vol_ratio, macd_rising=macd_rising, bb_width_pct=bb_width_pct)
+
+    # ── PRE-BREAKOUT detection ──────────────────────────
+    # Fires when: BB squeeze + volume building + RSI recovering + price at support
+    pre_breakout = False
+    if signal in ("NEUTRAL", "BUY") and bbu and bbl and closes[-1] > 0:
+        bb_pct_pos = (closes[-1] - bbl) / (bbu - bbl) * 100 if (bbu - bbl) > 0 else 50
+        pre_breakout = (
+            bb_width_pct < 5.0 and          # BB squeeze — bands very tight
+            vol_ratio >= 1.5 and             # volume building (1.5x average)
+            35 <= rsi <= 55 and              # RSI recovering, not overbought
+            bb_pct_pos < 25                  # price near lower band
+        )
+        if pre_breakout:
+            signal  = "PRE-BREAKOUT"
+            sig_clr = "orange"
 
     result = {
         "price":        closes[-1],
@@ -552,6 +602,7 @@ def analyse(symbol, raw_klines, change_24h=0.0):
         "last_vol":     vols[-1],
         "vol_ratio":    vol_ratio,
         "vol_spike":    vol_ratio >= 2.0,   # True if volume > 2x average
+        "adr_pct":      adr_pct,             # avg candle range % — low = flat coin
         "pattern":      pattern,
         "signal":       signal,
         "sig_clr":      sig_clr,
@@ -944,8 +995,9 @@ class Scanner:
             # Within each tier: highest expected_move first, then potential
             def sort_key(r):
                 sig = r["signal"]
-                if   sig == "STRONG BUY":  tier = 0
-                elif sig == "STRONG SELL": tier = 1
+                if   sig == "PRE-BREAKOUT": tier = 0
+                elif sig == "STRONG BUY":  tier = 1
+                elif sig == "STRONG SELL": tier = 2
                 elif sig == "BUY":         tier = 2
                 elif sig == "SELL":        tier = 3
                 else:                      tier = 4
@@ -989,6 +1041,7 @@ ALERT_CFG = {
     "max_rsi":          70,         # only alert if RSI <= this
     "max_bb_pct":       80,         # only alert if BB% <= this (0=oversold, 100=overbought)
     "require_vol_spike": False,     # only alert if volume spike detected
+    "min_adr_pct":      0.5,        # minimum avg candle range % — skip flat coins
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -1073,6 +1126,9 @@ def _init_sounds():
     global _SOUNDS
     definitions = {
         # STRONG BUY: 3-beep aggressive ascending burst
+        "PRE-BREAKOUT": [
+            (660, 0.12), (0, 0.04), (880, 0.12), (0, 0.04), (1100, 0.20),
+        ],
         "STRONG BUY": [
             (880, 0.14), (0, 0.04),
             (1100, 0.14), (0, 0.04),
@@ -1181,6 +1237,135 @@ def record_trade_loss(pnl: float):
             _daily_loss_tracker["loss"] = 0.0
         _daily_loss_tracker["loss"] += abs(pnl)
 
+
+# ─────────────────────────────────────────────────────────────
+#  SIGNAL AUDIT LOGGER
+#  Logs every scan result to CSV for post-analysis
+# ─────────────────────────────────────────────────────────────
+def _get_signal_log_path():
+    """Returns today's signal log path: signal_log_YYYY-MM-DD.csv"""
+    from datetime import datetime as _dt
+    date_str = _dt.now().strftime("%Y-%m-%d")
+    return os.path.join(APP_LOGS_DIR,
+                        f"signal_log_{date_str}.csv")
+
+def _cleanup_old_signal_logs(keep_days=7):
+    """Delete signal log files older than keep_days."""
+    import glob
+    from datetime import datetime as _dt, timedelta as _td
+    log_dir = APP_LOGS_DIR
+    cutoff  = _dt.now() - _td(days=keep_days)
+    for fpath in glob.glob(os.path.join(log_dir, "signal_log_*.csv")):
+        fname = os.path.basename(fpath)
+        try:
+            date_str = fname.replace("signal_log_", "").replace(".csv", "")
+            fdate = _dt.strptime(date_str, "%Y-%m-%d")
+            if fdate < cutoff:
+                os.remove(fpath)
+        except Exception:
+            pass
+
+# For backward compat — points to today's file
+SIGNAL_LOG_PATH = _get_signal_log_path()
+_SIGNAL_LOG_HEADERS = [
+    "timestamp", "symbol", "price", "change_24h",
+    "signal", "confidence", "rsi", "stoch_rsi", "macd_hist",
+    "bb_pct", "bb_width_pct", "vol_ratio", "vol_spike",
+    "pattern", "long_score", "short_score",
+    "potential", "exp_move", "trend_1h",
+    "adr_pct", "alert_fired", "safety_blocked", "safety_reason"
+]
+
+def log_scan_results(results, alert_cfg=None, safety_cfg=None, trades=None):
+    """
+    Append all scan results to the signal log CSV.
+    Called after every scan — builds a full audit trail.
+    """
+    import csv
+    from datetime import datetime as _dt
+
+    now = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+    trades = trades or []
+
+    # Determine which signals would have fired an alert
+    sig_order = {
+        "PRE-BREAKOUT": 0, "STRONG BUY": 1, "STRONG SELL": 2,
+        "BUY": 3, "SELL": 4, "NEUTRAL": 5
+    }
+    min_level = sig_order.get(
+        ALERT_CFG.get("min_signal", "BUY"), 3
+    )
+
+    log_path   = _get_signal_log_path()
+    file_exists = os.path.exists(log_path)
+    # Clean up old logs (runs quickly, once per call)
+    try:
+        _cleanup_old_signal_logs(keep_days=7)
+    except Exception:
+        pass
+    try:
+        with open(log_path, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=_SIGNAL_LOG_HEADERS)
+            if not file_exists:
+                writer.writeheader()
+
+            for r in results:
+                sig   = r.get("signal", "NEUTRAL")
+                pot   = r.get("potential", 0)
+                exp   = r.get("expected_move", 0)
+                rsi   = r.get("rsi", 0)
+                bb_pct_raw = 0
+                if r.get("bb_upper") and r.get("bb_lower") and r["bb_upper"] != r["bb_lower"]:
+                    bb_pct_raw = (r["price"] - r["bb_lower"]) / (r["bb_upper"] - r["bb_lower"]) * 100
+
+                # Would this have fired an alert?
+                level = sig_order.get(sig, 5)
+                alert_fired = (
+                    level <= min_level and
+                    pot  >= ALERT_CFG.get("min_potential", 0) and
+                    exp  >= ALERT_CFG.get("min_exp_move", 0) and
+                    rsi  <= ALERT_CFG.get("max_rsi", 100) and
+                    bb_pct_raw <= ALERT_CFG.get("max_bb_pct", 200) and
+                    (not ALERT_CFG.get("require_vol_spike") or r.get("vol_spike", False))
+                )
+
+                # Would safety have blocked it?
+                safety_blocked = False
+                safety_reason  = ""
+                if alert_fired and "BUY" in sig:
+                    ok, reason = check_trade_safety(r, trades)
+                    if not ok:
+                        safety_blocked = True
+                        safety_reason  = reason
+
+                writer.writerow({
+                    "timestamp":    now,
+                    "symbol":       r.get("symbol", ""),
+                    "price":        round(r.get("price", 0), 8),
+                    "change_24h":   round(r.get("change", 0), 2),
+                    "signal":       sig,
+                    "confidence":   r.get("signal_conf", 1),
+                    "rsi":          round(rsi, 1),
+                    "stoch_rsi":    round(r.get("stoch_rsi", 0), 1),
+                    "macd_hist":    round(r.get("macd_hist", 0), 6),
+                    "bb_pct":       round(bb_pct_raw, 1),
+                    "bb_width_pct": round(r.get("bb_width_pct", 0), 2),
+                    "vol_ratio":    round(r.get("vol_ratio", 0), 2),
+                    "vol_spike":    r.get("vol_spike", False),
+                    "pattern":      r.get("pattern", ""),
+                    "long_score":   r.get("long_score", 0),
+                    "short_score":  r.get("short_score", 0),
+                    "potential":    round(pot, 1),
+                    "exp_move":     round(exp, 2),
+                    "trend_1h":     r.get("trend_1h", ""),
+                    "adr_pct":      round(r.get("adr_pct", 0), 2),
+                    "alert_fired":  alert_fired,
+                    "safety_blocked": safety_blocked,
+                    "safety_reason":  safety_reason,
+                })
+    except Exception as e:
+        pass  # never crash the app due to logging
+
 class AlertEngine(QObject):
     """
     Background alert engine.
@@ -1269,7 +1454,7 @@ class AlertEngine(QObject):
                 self._last_signals[r["symbol"]] = r["signal"]
             return
 
-        sig_order = {"STRONG BUY": 0, "STRONG SELL": 1, "BUY": 2, "SELL": 3, "NEUTRAL": 4}
+        sig_order = {"PRE-BREAKOUT": 0, "STRONG BUY": 1, "STRONG SELL": 2, "BUY": 3, "SELL": 4, "NEUTRAL": 5}
         min_level = sig_order.get(ALERT_CFG["min_signal"], 2)
 
         for r in results:
@@ -1288,6 +1473,7 @@ class AlertEngine(QObject):
                       exp >= ALERT_CFG["min_exp_move"] and
                       r.get("rsi", 50) <= ALERT_CFG["max_rsi"] and
                       r.get("bb_pct", 50) <= ALERT_CFG["max_bb_pct"] and
+                      r.get("adr_pct", 0) >= ALERT_CFG["min_adr_pct"] and
                       (not ALERT_CFG["require_vol_spike"] or r.get("vol_spike", False)))
 
             if is_new and passes:
@@ -1816,6 +2002,7 @@ class TooltipHeaderView(QHeaderView):
 
 class SignalBadge(QLabel):
     COLORS = {
+        "PRE-BREAKOUT":("#ff9900", "#2a1800",    "#ffaa33"),
         "STRONG BUY":  (GREEN,  STRONG_BUY_BG,  "#00ff88"),
         "BUY":         (GREEN,  BUY_BG,          "#00cc66"),
         "STRONG SELL": (RED,    STRONG_SELL_BG,  "#ff3366"),
@@ -2348,6 +2535,104 @@ class _EquityCanvas(QWidget):
                            Qt.AlignmentFlag.AlignCenter, lbl)
 
 
+
+# ─────────────────────────────────────────────────────────────
+#  WEBSOCKET PRICE FEED
+#  Subscribes to Binance miniTicker stream for real-time prices.
+#  Falls back to REST polling if websocket-client not available.
+# ─────────────────────────────────────────────────────────────
+
+class BinanceWebSocketPrices(QObject):
+    """
+    Maintains a persistent WebSocket connection to Binance.
+    Emits price_update(symbol, price) signal on every tick.
+    Auto-reconnects on disconnect.
+    """
+    price_update = pyqtSignal(str, float)   # symbol, price
+    connected    = pyqtSignal()
+    disconnected = pyqtSignal()
+
+    def __init__(self):
+        super().__init__()
+        self._subscribed  = set()   # symbols currently subscribed
+        self._ws          = None
+        self._thread      = None
+        self._running     = False
+        self._reconnect_delay = 3   # seconds before reconnect
+
+    def _ws_url(self):
+        if TRADING_CFG["testnet"]:
+            return "wss://stream.testnet.binance.vision/stream?streams=!miniTicker@arr"
+        else:
+            return "wss://stream.binance.com:9443/stream?streams=!miniTicker@arr@3000ms/!bookTicker"
+
+    def start(self):
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._running = False
+        if self._ws:
+            try:
+                self._ws.close()
+            except Exception:
+                pass
+
+    def subscribe(self, symbols: set):
+        """Store subscribed symbols for filtering incoming messages."""
+        self._subscribed = {s.upper() for s in symbols}
+
+    def _run(self):
+        while self._running:
+            try:
+                url = self._ws_url()
+
+                def on_message(ws, msg):
+                    try:
+                        if not self._subscribed:
+                            return  # don't process until we have symbols
+                        data = json.loads(msg)
+                        tickers = data.get("data", data)
+                        if isinstance(tickers, list):
+                            for d in tickers:
+                                sym   = d.get("s", "")
+                                price = float(d.get("c", 0))
+                                if price > 0 and sym in self._subscribed:
+                                    self.price_update.emit(sym, price)
+                        elif isinstance(tickers, dict):
+                            sym   = tickers.get("s", "")
+                            price = float(tickers.get("c", 0))
+                            if sym and price > 0 and sym in self._subscribed:
+                                self.price_update.emit(sym, price)
+                    except Exception:
+                        pass
+
+                def on_open(ws):
+                    self.connected.emit()
+
+                def on_close(ws, code, msg):
+                    self.disconnected.emit()
+
+                def on_error(ws, err):
+                    pass
+
+                self._ws = _websocket.WebSocketApp(
+                    url,
+                    on_message=on_message,
+                    on_open=on_open,
+                    on_close=on_close,
+                    on_error=on_error,
+                )
+                self._ws.run_forever(ping_interval=30, ping_timeout=10)
+            except Exception:
+                pass
+
+            if self._running:
+                time.sleep(self._reconnect_delay)
+
 class CryptoScannerWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -2391,12 +2676,24 @@ class CryptoScannerWindow(QMainWindow):
         self._alert_engine.new_alert.connect(self._on_new_alert)
         self._alert_engine.scan_done.connect(self._on_alert_scan_done)
         self._alert_engine.scan_started.connect(self._on_alert_scan_started)
+
+        # WebSocket price feed
+        if _WS_AVAILABLE:
+            self._ws_feed = BinanceWebSocketPrices()
+            self._ws_feed.price_update.connect(self._on_ws_price)
+            self._ws_feed.connected.connect(self._on_ws_connected)
+            self._ws_feed.disconnected.connect(self._on_ws_disconnected)
+        else:
+            self._ws_feed = None
+        self._alert_engine.scan_started.connect(self._on_alert_scan_started)
         self._build_ui()
         self._setup_timer()
         self._restore_settings()  # after UI is built
         # Start trade price monitor immediately — runs always, not just on Trades tab
         self._trades_refresh_timer.start()
         self._alert_engine.start()
+        # WebSocket starts after first scan completes (needs symbol list first)
+        # _on_alert_scan_done will start it
         # Refresh balance display on startup
         QTimer.singleShot(1000, self._refresh_balance_display)
         # Show scanning status immediately so user knows it's working
@@ -2544,6 +2841,15 @@ class CryptoScannerWindow(QMainWindow):
         self._scan_dot.setStyleSheet("color: #00cc66; font-size:11px; padding:0 4px;")
         self._scan_dot.setToolTip("Scanner idle")
         self.statusBar().addPermanentWidget(self._scan_dot)
+
+        # WebSocket status indicator
+        if _WS_AVAILABLE:
+            self._ws_status_lbl = QLabel("⚡ WS")
+            self._ws_status_lbl.setStyleSheet(
+                f"color:{DIM}; font-size:10px; font-weight:700; padding:0 6px;")
+            self._ws_status_lbl.setToolTip("WebSocket — waiting for connection")
+            self.statusBar().addPermanentWidget(self._ws_status_lbl)
+
         ver_lbl = QLabel(f"  {APP_VERSION}  ")
         ver_lbl.setStyleSheet(
             f"color:{ACCENT}; font-family:{MONO_CSS}; font-weight:700; "
@@ -2697,7 +3003,7 @@ class CryptoScannerWindow(QMainWindow):
         root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(10)
 
-        hint = QLabel("Right-click any coin in the Scanner tab to open a LONG or SHORT trade.")
+        hint = QLabel("Right-click any coin in the Scanner tab to open a BUY trade.")
         hint.setStyleSheet(f"color:{DIM}; font-size:11px; padding:4px 0;")
         root.addWidget(hint)
 
@@ -2878,8 +3184,9 @@ class CryptoScannerWindow(QMainWindow):
 
         menu.addSeparator()
 
-        long_act  = menu.addAction(f"📈  LONG  (buy {sym})")
-        short_act = menu.addAction(f"📉  SHORT  (sell {sym})")
+        long_act  = menu.addAction(f"📈  BUY  {sym}")
+        short_act = menu.addAction(f"📉  SELL  {sym}  (margin — coming soon)")
+        short_act.setEnabled(False)
         menu.addSeparator()
 
         detail_act  = menu.addAction("🔍  View Details")
@@ -2887,10 +3194,12 @@ class CryptoScannerWindow(QMainWindow):
         tv_act      = menu.addAction(f"📈  Open {sym} on TradingView")
 
         # Highlight recommended direction
-        if "BUY" in sig:
-            long_act.setText(f"📈  LONG  (buy {sym})  ← {sig}")
+        if sig == "PRE-BREAKOUT":
+            long_act.setText(f"📈  BUY  {sym}  ← ⚡ PRE-BREAKOUT")
+        elif "BUY" in sig:
+            long_act.setText(f"📈  BUY  {sym}  ← {sig}")
         elif "SELL" in sig:
-            short_act.setText(f"📉  SHORT  (sell {sym})  ← {sig}")
+            short_act.setText(f"📉  SELL  {sym}  ← {sig}  (coming soon)")
 
         action = menu.exec(self.table.viewport().mapToGlobal(pos))
         if action == long_act:
@@ -2933,7 +3242,7 @@ class CryptoScannerWindow(QMainWindow):
         side   = trade["side"]
         status = trade["status"]
 
-        title_act = menu.addAction(f"  {side} {sym}")
+        title_act = menu.addAction(f"  {"BUY" if side == "LONG" else "SELL"} {sym}")
         title_act.setEnabled(False)
         menu.addSeparator()
 
@@ -2990,7 +3299,7 @@ class CryptoScannerWindow(QMainWindow):
         api_ready = bool(TRADING_CFG["api_key"] and TRADING_CFG["api_secret"])
 
         dlg = QDialog(self)
-        dlg.setWindowTitle(f"Open {side} — {sym}")
+        dlg.setWindowTitle(f"Open {"BUY" if side == "LONG" else "SELL"} — {sym}")
         dlg.setModal(True)
         dlg.setMinimumWidth(420)
         dlg.setStyleSheet(f"background:{DARK2}; color:{WHITE};")
@@ -3228,7 +3537,7 @@ class CryptoScannerWindow(QMainWindow):
             vlay.addWidget(oco_note)
 
         btn_row = QHBoxLayout()
-        ok_btn = QPushButton(f"{icon}  Confirm Open {side}")
+        ok_btn = QPushButton(f"{icon}  Confirm {"BUY" if side == "LONG" else "SELL"}")
         ok_btn.setStyleSheet(
             f"background:{'#002a1a' if side=='LONG' else '#2a0010'}; color:{accent}; "
             f"border:1px solid {accent}; border-radius:4px; font-weight:700; padding:4px 16px;")
@@ -3671,6 +3980,10 @@ class CryptoScannerWindow(QMainWindow):
         trade["note"]  = note_edit.text().strip()
         self._save_trades()
         self._refresh_trades_table()
+        # Subscribe new symbol to WebSocket
+        if self._ws_feed:
+            syms = {t["symbol"] for t in self._trades if t["status"] == "OPEN"}
+            self._ws_feed.subscribe(syms)
         self._show_status(f"Trade updated: {side} {sym}")
 
     # ── Delete selected trade ────────────────────────────────
@@ -3767,6 +4080,7 @@ class CryptoScannerWindow(QMainWindow):
             center = Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignCenter
             side   = trade["side"]
             side_col = GREEN if side == "LONG" else RED
+            side_label = "BUY" if side == "LONG" else "SELL"
 
             if trade.get("pnl") is not None:
                 pnl     = trade["pnl"]
@@ -3817,7 +4131,7 @@ class CryptoScannerWindow(QMainWindow):
 
             self.tr_table.setItem(r, 0,  cell(trade["time"],              DIM,       align=left))
             self.tr_table.setItem(r, 1,  cell(trade["symbol"].replace("USDT",""), ACCENT, bold=True, align=left))
-            self.tr_table.setItem(r, 2,  cell(side,                       side_col,  bold=True, align=center))
+            self.tr_table.setItem(r, 2,  cell(side_label,                 side_col,  bold=True, align=center))
             self.tr_table.setItem(r, 3,  cell(f"${trade['entry']:.8f}",   WHITE))
             self.tr_table.setItem(r, 4,  cell(f"{trade['qty']}",          WHITE))
             self.tr_table.setItem(r, 5,  cell(f"${trade['sl']:.8f}" if trade.get("sl") else "—", DIM))
@@ -3917,8 +4231,8 @@ class CryptoScannerWindow(QMainWindow):
                 labels.append(t["symbol"].replace("USDT",""))
             self._equity_canvas.set_data(cum_pts, labels)
 
-    TRADES_FILE = os.path.expanduser("~/.crypto_scanner_trades.json")
-    TRADE_LOG   = os.path.expanduser("~/.crypto_scanner_trade_log.txt")
+    TRADES_FILE = os.path.join(APP_LOGS_DIR, "trades.json")
+    TRADE_LOG   = os.path.join(APP_LOGS_DIR, "trade_log.txt")
 
     def _save_trades(self):
         try:
@@ -3975,10 +4289,10 @@ class CryptoScannerWindow(QMainWindow):
             self._fetch_open_trade_prices()
 
     def _fetch_open_trade_prices(self):
-        """Fetch current prices for open trades every 3s.
-        Also drives real-time TP/SL detection and order execution —
-        independent of the main scan interval.
-        Guard against concurrent calls."""
+        """Fallback REST polling — only runs when WebSocket is not available."""
+        # Skip if WebSocket is active — it handles price updates faster
+        if self._ws_feed and self._ws_feed._running and self._ws_feed._ws:
+            return
         if getattr(self, '_trade_price_fetch_running', False):
             return
         open_trades = [t for t in self._trades if t["status"] == "OPEN"]
@@ -4240,7 +4554,7 @@ class CryptoScannerWindow(QMainWindow):
 
         self.al_min_signal = QComboBox()
         self.al_min_signal.setFixedWidth(160)
-        for s in ["BUY", "STRONG BUY"]:
+        for s in ["PRE-BREAKOUT", "BUY", "STRONG BUY"]:
             self.al_min_signal.addItem(s)
         self.al_min_signal.setCurrentText(ALERT_CFG["min_signal"])
 
@@ -4272,6 +4586,19 @@ class CryptoScannerWindow(QMainWindow):
         self.al_vol_spike = QCheckBox("Require volume spike")
         self.al_vol_spike.setChecked(ALERT_CFG["require_vol_spike"])
         self.al_vol_spike.setStyleSheet(f"color:{WHITE};")
+        self.al_vol_spike.setToolTip("Only alert if unusual volume detected")
+
+        self.al_min_adr = QDoubleSpinBox()
+        self.al_min_adr.setFixedWidth(160)
+        self.al_min_adr.setRange(0, 20)
+        self.al_min_adr.setDecimals(1)
+        self.al_min_adr.setValue(ALERT_CFG.get("min_adr_pct", 0.5))
+        self.al_min_adr.setSuffix("%")
+        self.al_min_adr.setToolTip(
+            "Skip coins with avg candle range below this\n"
+            "NIGHT ~1% → set 2%+ to exclude flat coins\n"
+            "Higher = only coins with real price movement"
+        )
 
         rows = [
             ("Scan interval",   self.al_interval),
@@ -4280,6 +4607,7 @@ class CryptoScannerWindow(QMainWindow):
             ("Min Exp Move %",  self.al_min_exp),
             ("Max RSI",         self.al_max_rsi),
             ("Max BB%",         self.al_max_bb),
+            ("Min ADR %",       self.al_min_adr),
         ]
         aglay.addWidget(self.al_enabled, 0, 0, 1, 2)
         for i, (lbl_text, widget) in enumerate(rows, 1):
@@ -4456,6 +4784,7 @@ class CryptoScannerWindow(QMainWindow):
         ALERT_CFG["max_rsi"]          = self.al_max_rsi.value()
         ALERT_CFG["max_bb_pct"]       = self.al_max_bb.value()
         ALERT_CFG["require_vol_spike"] = self.al_vol_spike.isChecked()
+        ALERT_CFG["min_adr_pct"]      = self.al_min_adr.value()
         ALERT_CFG["sound"]            = self.al_sound.isChecked()
         ALERT_CFG["desktop"]          = self.al_desktop.isChecked()
         ALERT_CFG["telegram"]         = self.al_tg.isChecked()
@@ -4606,6 +4935,40 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         count = self.alert_log_layout.count()
         self.alert_log_layout.insertWidget(count - 1, row_w)
 
+    def _on_ws_connected(self):
+        """WebSocket connected — update status bar indicator."""
+        if hasattr(self, '_ws_status_lbl'):
+            self._ws_status_lbl.setText("⚡ WS")
+            self._ws_status_lbl.setStyleSheet(
+                f"color:#00cc66; font-size:10px; font-weight:700; padding:0 6px;")
+            self._ws_status_lbl.setToolTip("WebSocket connected — live price feed active")
+
+    def _on_ws_disconnected(self):
+        """WebSocket disconnected — update status bar indicator."""
+        if hasattr(self, '_ws_status_lbl'):
+            self._ws_status_lbl.setText("⚡ WS")
+            self._ws_status_lbl.setStyleSheet(
+                f"color:{YELLOW}; font-size:10px; font-weight:700; padding:0 6px;")
+            self._ws_status_lbl.setToolTip("WebSocket disconnected — reconnecting…")
+
+    def _on_ws_price(self, symbol: str, price: float):
+        """Called on every WebSocket price tick — updates live prices and checks TP/SL."""
+        self._live_prices[symbol] = price
+        # Mirror into scan results
+        for r in self._results:
+            if r["symbol"] == symbol:
+                r["price"] = price
+        # Refresh trades display (throttled — only if Trades tab visible or trade open)
+        if not getattr(self, "_ws_refresh_pending", False):
+            self._ws_refresh_pending = True
+            QTimer.singleShot(500, self._ws_flush)
+
+    def _ws_flush(self):
+        """Flush accumulated WebSocket updates to UI — max 2x per second."""
+        self._ws_refresh_pending = False
+        self._check_sltp_hits(self._results)
+        self._refresh_trades_table()
+
     def _on_alert_scan_started(self):
         """Background scan just started — update button to show scanning state."""
         if self._worker is None or not self._worker.isRunning():
@@ -4628,6 +4991,22 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
             self.scan_btn.setEnabled(True)
             self.scan_btn.setText("⚡")
             self._set_dot_idle(n)
+            # Log all signals for audit
+            threading.Thread(
+                target=log_scan_results,
+                args=(results,),
+                kwargs={"trades": self._trades},
+                daemon=True
+            ).start()
+            # Update log size label
+            QTimer.singleShot(2000, self._update_signal_log_size)
+            # Start/update WebSocket with scanned symbols
+            if self._ws_feed:
+                syms = {r["symbol"] for r in results}
+                syms |= {t["symbol"] for t in self._trades if t["status"] == "OPEN"}
+                self._ws_feed.subscribe(syms)
+                if not self._ws_feed._running:
+                    self._ws_feed.start()
 
     def _clear_alert_log(self):
         self._alert_log.clear()
@@ -4926,7 +5305,12 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
             flay.addWidget(l, i, 0)
             flay.addWidget(widget, i, 1, Qt.AlignmentFlag.AlignLeft)
 
-        lay.addWidget(filter_grp)
+        # ── 2-column grid layout ─────────────────────────
+        grid2 = QGridLayout()
+        grid2.setSpacing(12)
+        grid2.setColumnStretch(0, 1)
+        grid2.setColumnStretch(1, 1)
+        grid2.addWidget(filter_grp,  0, 0)
 
         # Risk settings
         risk_grp = QGroupBox("RISK MANAGEMENT")
@@ -4954,7 +5338,7 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         rr_lbl_title = QLabel("R/R Ratio"); rr_lbl_title.setStyleSheet(f"color:{DIM};")
         rlay.addWidget(rr_lbl_title, len(risk_rows), 0)
         rlay.addWidget(self.rr_lbl, len(risk_rows), 1)
-        lay.addWidget(risk_grp)
+        grid2.addWidget(risk_grp,   0, 1)
 
         # ── TRADE SAFETY ─────────────────────────────────
         safety_grp = QGroupBox("TRADE SAFETY")
@@ -5037,7 +5421,7 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         slay.addWidget(self.sf_daily_loss_n, 4, 1, Qt.AlignmentFlag.AlignLeft)
         slay.addWidget(self.sf_reset_btn,    5, 0, 1, 2)
 
-        lay.addWidget(safety_grp)
+        grid2.addWidget(safety_grp, 1, 0)
 
         ui_grp = QGroupBox("UI APPEARANCE")
         ulay   = _cfg_grid(ui_grp)
@@ -5057,7 +5441,7 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         ulay.addWidget(fs_lbl,            0, 0)
         ulay.addWidget(self.cfg_font_size, 0, 1, Qt.AlignmentFlag.AlignLeft)
         ulay.addWidget(fs_hint,            1, 0, 1, 2)
-        lay.addWidget(ui_grp)
+        grid2.addWidget(ui_grp,     1, 1)
 
         alert_grp = QGroupBox("ALERTS")
         alay = QHBoxLayout(alert_grp)
@@ -5072,10 +5456,11 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
 
         alay.addWidget(self.cfg_alert_enabled)
         alay.addStretch()
-        lay.addWidget(alert_grp)
+        grid2.addWidget(alert_grp,  2, 0)
 
         export_grp = QGroupBox("EXPORT SCAN RESULTS")
-        elay = QHBoxLayout(export_grp)
+        elay = QVBoxLayout(export_grp)
+        elay.setSpacing(8)
 
         export_btn = QPushButton("↓  Export Last Scan to JSON")
         export_btn.setFixedHeight(34)
@@ -5084,15 +5469,44 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
             f"border-radius:4px; font-weight:700; padding:0 14px;"
         )
         export_btn.clicked.connect(self._export)
-
         self.cfg_export_lbl = QLabel("No scan yet")
         self.cfg_export_lbl.setStyleSheet(f"color:{DIM}; font-size:11px;")
+        exp_row = QHBoxLayout()
+        exp_row.addWidget(export_btn)
+        exp_row.addSpacing(12)
+        exp_row.addWidget(self.cfg_export_lbl)
+        exp_row.addStretch()
+        elay.addLayout(exp_row)
 
-        elay.addWidget(export_btn)
-        elay.addSpacing(12)
-        elay.addWidget(self.cfg_export_lbl)
-        elay.addStretch()
-        lay.addWidget(export_grp)
+        # Signal audit log
+        signal_log_btn = QPushButton("📋  Open Signal Log")
+        signal_log_btn.setFixedHeight(30)
+        signal_log_btn.setStyleSheet(
+            f"background:{CARD}; color:{YELLOW}; border:1px solid {YELLOW}; "
+            f"border-radius:4px; font-size:11px; padding:0 12px;")
+        signal_log_btn.setToolTip(f"CSV audit log of all scan results: {SIGNAL_LOG_PATH}")
+        signal_log_btn.clicked.connect(self._open_signal_log)
+
+        self._signal_log_size_lbl = QLabel()
+        self._signal_log_size_lbl.setStyleSheet(f"color:{DIM}; font-size:10px;")
+        self._update_signal_log_size()
+
+        clear_log_btn = QPushButton("🗑  Clear")
+        clear_log_btn.setFixedHeight(30)
+        clear_log_btn.setStyleSheet(
+            f"background:{CARD}; color:{DIM}; border:1px solid {BORDER}; "
+            f"border-radius:4px; font-size:11px; padding:0 10px;")
+        clear_log_btn.clicked.connect(self._clear_signal_log)
+
+        log_row = QHBoxLayout()
+        log_row.addWidget(signal_log_btn)
+        log_row.addWidget(clear_log_btn)
+        log_row.addWidget(self._signal_log_size_lbl)
+        log_row.addStretch()
+        elay.addLayout(log_row)
+
+        grid2.addWidget(export_grp, 2, 1)
+        lay.addLayout(grid2)
 
         api_grp = QGroupBox("BINANCE API  —  TRADING")
         api_grp.setStyleSheet(
@@ -5442,10 +5856,10 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
                     SAFETY_CFG[k] = val in (True, "true", "True", "1")
                 elif isinstance(SAFETY_CFG[k], float):
                     try: SAFETY_CFG[k] = float(val)
-                    except: pass
+                    except (ValueError, TypeError): pass
                 elif isinstance(SAFETY_CFG[k], int):
                     try: SAFETY_CFG[k] = int(val)
-                    except: pass
+                    except (ValueError, TypeError): pass
         if hasattr(self, "sf_persistence"):
             self.sf_persistence.setChecked(SAFETY_CFG["signal_persistence"])
             self.sf_btc_check.setChecked(SAFETY_CFG["btc_trend_check"])
@@ -5557,6 +5971,7 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
                 self.al_max_rsi.setValue(int(ALERT_CFG.get("max_rsi", 70)))
                 self.al_max_bb.setValue(int(ALERT_CFG.get("max_bb_pct", 80)))
                 self.al_vol_spike.setChecked(ALERT_CFG.get("require_vol_spike", False))
+                self.al_min_adr.setValue(float(ALERT_CFG.get("min_adr_pct", 0.5)))
             self.al_min_signal.setCurrentText(ALERT_CFG["min_signal"])
             self.al_min_pot.setValue(int(ALERT_CFG["min_potential"]))
             self.al_min_exp.setValue(float(ALERT_CFG["min_exp_move"]))
@@ -5658,6 +6073,8 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         self._alert_engine.stop()
         self._trades_refresh_timer.stop()
         self._dot_blink_timer.stop()
+        if self._ws_feed:
+            self._ws_feed.stop()
         self._save_settings()
         super().closeEvent(event)
 
@@ -5731,6 +6148,13 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         self.scan_btn.setEnabled(True)
         self.scan_btn.setText("⚡")
         self._set_dot_idle(len(results))
+        # Log all signals for audit
+        threading.Thread(
+            target=log_scan_results,
+            args=(results,),
+            kwargs={"trades": self._trades},
+            daemon=True
+        ).start()
      
         n = len(results)
         self.statusBar().showMessage(f"Done — {n} coins  [{datetime.now().strftime('%H:%M:%S')}]")
@@ -5773,7 +6197,7 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
                 if r.get("bb_upper") and r.get("bb_lower") and r["bb_upper"] != r["bb_lower"]
                 else 50.0),
         8:  lambda r, i: r["volume_24h"],                           # Vol 24h
-        9:  lambda r, i: {"STRONG BUY":0,"BUY":1,                  # Signal tier
+        9:  lambda r, i: {"PRE-BREAKOUT":0,"STRONG BUY":1,"BUY":2,"NEUTRAL":3,"SELL":4,"STRONG SELL":5,                  # Signal tier
                            "NEUTRAL":2,"SELL":3,"STRONG SELL":4}.get(r["signal"], 2),
         10: lambda r, i: r.get("potential", 0),                     # Pot%
         11: lambda r, i: r.get("expected_move", 0),                 # Exp%
@@ -5876,7 +6300,7 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
             self.table.setItem(row, 7,  cell(bb_pos, YELLOW, sort_val=bb_num))
             self.table.setItem(row, 8,  cell(f"${vol_m:.1f}M", ACCENT, sort_val=r["volume_24h"]))
 
-            sig_tier = {"STRONG BUY":0,"BUY":1,"NEUTRAL":2,"SELL":3,"STRONG SELL":4}.get(sig, 2)
+            sig_tier = {"PRE-BREAKOUT":0,"STRONG BUY":1,"BUY":2,"NEUTRAL":3,"SELL":4,"STRONG SELL":5}.get(sig, 3)
             sig_item = QTableWidgetItem(sig)
             sig_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             sig_c = GREEN if "BUY" in sig else RED if "SELL" in sig else DIM
@@ -5970,26 +6394,24 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
             if item.widget():
                 item.widget().deleteLater()
 
-        n     = CFG.get("picks_n", 5)
-        buys  = [r for r in results if "BUY"  in r["signal"]][:n]
-        sells = [r for r in results if "SELL" in r["signal"]][:n]
+        n      = CFG.get("picks_n", 5)
+        pre_bo = [r for r in results if r["signal"] == "PRE-BREAKOUT"][:n]
+        buys   = [r for r in results if r["signal"] in ("STRONG BUY", "BUY")][:n]
+        sells  = [r for r in results if r["signal"] in ("STRONG SELL", "SELL")][:n]
 
-        for section_name, section_results, color in [
-            ("🟢  LONG CANDIDATES", buys,  GREEN),
-            ("🔴  SHORT CANDIDATES", sells, RED),
+        for section_name, section_results, color, is_long in [
+            ("⚡  PRE-BREAKOUT",    pre_bo, "#ff9900", True),
+            ("🟢  LONG CANDIDATES", buys,   GREEN,     True),
+            ("🔴  SHORT CANDIDATES",sells,  RED,       False),
         ]:
+            if not section_results:
+                continue
             lbl = QLabel(section_name)
             lbl.setStyleSheet(f"color:{color}; font-size:15px; font-weight:800; padding:8px 0 4px 0;")
             self.picks_lay.addWidget(lbl)
 
-            if not section_results:
-                none_lbl = QLabel("None this scan.")
-                none_lbl.setStyleSheet(f"color:{DIM}; padding:4px 16px;")
-                self.picks_lay.addWidget(none_lbl)
-                continue
-
             for r in section_results:
-                self.picks_lay.addWidget(self._build_pick_card(r, color == GREEN))
+                self.picks_lay.addWidget(self._build_pick_card(r, is_long))
 
         self.picks_lay.addStretch()
 
@@ -6445,6 +6867,55 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
 
         dlg.show()
 
+    def _update_signal_log_size(self):
+        """Update signal log size label — shows today's row count and total size."""
+        if not hasattr(self, '_signal_log_size_lbl'):
+            return
+        import glob
+        log_dir  = APP_LOGS_DIR
+        log_path = _get_signal_log_path()
+        try:
+            # Today's rows
+            today_rows = 0
+            if os.path.exists(log_path):
+                with open(log_path) as f:
+                    today_rows = max(0, sum(1 for _ in f) - 1)
+            # Total size of all daily files
+            all_files = glob.glob(os.path.join(log_dir, "signal_log_*.csv"))
+            total_kb  = sum(os.path.getsize(f) for f in all_files) // 1024
+            n_files   = len(all_files)
+            if n_files:
+                self._signal_log_size_lbl.setText(
+                    f"Today: {today_rows:,} rows  |  {n_files} files  {total_kb}KB total")
+            else:
+                self._signal_log_size_lbl.setText("No log yet")
+        except Exception:
+            self._signal_log_size_lbl.setText("No log yet")
+
+    def _open_signal_log(self):
+        """Open today's signal log CSV in default application."""
+        log_path = _get_signal_log_path()
+        if os.path.exists(log_path):
+            open_url(f"file://{log_path}")
+        else:
+            self._show_status("No signal log yet — run a scan first")
+
+    def _clear_signal_log(self):
+        """Delete all signal log files."""
+        import glob
+        log_dir   = APP_LOGS_DIR
+        all_files = glob.glob(os.path.join(log_dir, "signal_log_*.csv"))
+        if not all_files:
+            self._show_status("No signal logs to clear")
+            return
+        try:
+            for f in all_files:
+                os.remove(f)
+            self._update_signal_log_size()
+            self._show_status(f"Cleared {len(all_files)} signal log file(s)")
+        except Exception as e:
+            self._show_status(f"Could not clear logs: {e}")
+
     def _export(self):
         if not self._results:
             self.statusBar().showMessage("Nothing to export — run a scan first")
@@ -6465,7 +6936,7 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
 def _global_exception_handler(exc_type, exc_value, exc_tb):
     """Catch any unhandled exception and log it to file."""
     import traceback, datetime
-    log_path = os.path.expanduser("~/.crypto_scanner_crash.log")
+    log_path = os.path.join(APP_LOGS_DIR, "crash.log")
     try:
         with open(log_path, "a") as f:
             f.write(f"\n{'='*60}\n")
@@ -6478,6 +6949,9 @@ def _global_exception_handler(exc_type, exc_value, exc_tb):
 
 
 def main():
+    # Create config/logs directory on first launch
+    os.makedirs(APP_LOGS_DIR, exist_ok=True)
+
     # Suppress Qt stderr noise about missing dbus portal and unknown CSS properties.
     # These are harmless Qt/desktop-environment warnings, not Python errors.
     os.environ.setdefault("QT_LOGGING_RULES",

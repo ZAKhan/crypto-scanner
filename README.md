@@ -1,12 +1,6 @@
-# Crypto Scalper Scanner v2.0.0
+# Crypto Scalper Scanner v2.2.0
 
 A professional PyQt6 desktop application for scanning Binance spot markets, identifying high-probability scalping opportunities, and executing live trades with automated stop-loss protection.
-
----
-
-## Screenshots
-
-> Scanner tab with live signals, Top Picks cards, Trades journal with real-time P&L.
 
 ---
 
@@ -17,86 +11,100 @@ A professional PyQt6 desktop application for scanning Binance spot markets, iden
 - Filters coins by price (< $1) and 24h volume (> $1M) — fully configurable
 - Analyses up to 30 top coins by volume per scan
 - Calculates RSI, StochRSI, MACD, Bollinger Bands, ATR, support/resistance, candlestick patterns
-- Confluence-based signal scoring — STRONG BUY / BUY / NEUTRAL / SELL / STRONG SELL
+- Confluence-based signal scoring — **PRE-BREAKOUT / STRONG BUY / BUY / NEUTRAL / SELL / STRONG SELL**
 - Columns: Symbol, Price, 24H%, RSI, StochRSI, MACD, BB%, Volume, Signal, POT%, EXP%, L/S score, Pattern, Sparkline chart, Age, Confidence, 1H trend
 - Live sparkline mini-charts per coin
 - Sortable columns, resizable, column width reset button
-- Right-click context menu: LONG, SHORT, View Details, Open on Binance (5m chart)
-- Top Picks tab — card view of best STRONG BUY / STRONG SELL signals
+- Right-click context menu: LONG, SHORT, View Details, Open on Binance (5m chart), Open on TradingView
+- Top Picks tab — card view with PRE-BREAKOUT, STRONG BUY and STRONG SELL sections
 - Detail popup with full indicator breakdown, support/resistance, BB levels
+
+### PRE-BREAKOUT Detection
+Fires when all 4 conditions are true simultaneously — early warning before a price spike:
+- BB width < 5% — Bollinger Bands squeezed tight (price coiling)
+- Volume ≥ 1.5x average — unusual volume building quietly
+- RSI between 35–55 — recovering but not overbought
+- Price in bottom 25% of BB range — sitting at support
+
+Shows as orange badge in scanner. Gets its own ⚡ PRE-BREAKOUT section in Top Picks. Has a distinct 3-tone ascending alert sound.
+
+### WebSocket Live Prices
+- Connects to Binance WebSocket stream after first scan
+- Real-time price updates every 3 seconds via persistent connection
+- No REST polling overhead — zero API rate limit usage for prices
+- TP/SL detection fires on every price update
+- Auto-reconnects on disconnect
+- Falls back to REST polling if websocket-client not installed
+- Status indicator ⚡ WS in status bar — green=connected, yellow=reconnecting
+- Testnet: wss://stream.testnet.binance.vision
+- Live: wss://stream.binance.com:9443
+
+### Trade Safety System
+All rules individually toggleable in Config tab → TRADE SAFETY:
+
+| Rule | Default | Description |
+|------|---------|-------------|
+| Signal persistence | On | Signal must hold 2+ consecutive scans |
+| BTC trend check | On | Skip if BTC dropping > 2% |
+| Coin trend check | On | Skip if coin down > 5% in 24h |
+| Max open trades | On | Hard limit of 3 concurrent trades |
+| Daily loss limit | On | Stop trading if losses exceed $100 |
+
+When a safety rule blocks a trade, a dialog explains why and offers an override. Daily loss counter resets automatically each day.
 
 ### Live Trading (Binance API)
 - Testnet and Live mode — toggle in Config tab with confirmation dialog
 - Red banner displayed prominently when in Live mode
 - Market BUY order execution with real fill price
-- OCO (One Cancels the Other) stop-loss placed automatically after every BUY
-  - Stop-loss lives on Binance servers — protects you even when app is closed
-- Market SELL on Take Profit — detected every 3 seconds
-- SL/TP auto-detection runs every 3 seconds independently of scan interval
-- Journal fallback — if a coin is not available on testnet, option to record as journal trade
+- OCO stop-loss placed automatically after every BUY
+- Stop-loss lives on Binance servers — protects you even when app is closed
+- TP/SL auto-detection via WebSocket — fires in milliseconds
+- Journal fallback for coins not available on testnet
 - Pre-checks symbol availability before attempting order
-- Sell qty uses actual step size from Binance exchange info — no precision errors
+- Sell qty uses actual step size — no precision errors
 - On insufficient balance error: automatically retries with actual held balance
-- Balance displayed in top bar — click to refresh, auto-refreshes after each scan
+- Balance displayed in top bar — click to refresh
 
 ### Trade Dialog
 - Shows TESTNET / LIVE mode banner prominently
 - Fetches live USDT balance from Binance
 - 25% / 50% / 75% / 100% quick-fill buttons
-- USDT amount field — plain number, click to select all and type new value
+- USDT amount field — click to select all and type instantly
 - Entry price (auto-filled from current price)
-- Stop Loss — price field + % field (bidirectional sync)
-- Take Profit — price field + % field (bidirectional sync)
+- Stop Loss and Take Profit — price field + % field (bidirectional sync)
 - Cost / SL risk / TP gain / Risk:Reward ratio shown live
-- OCO note shown when OCO is enabled
 
 ### Trades Journal
-- Persists between sessions (JSON file)
-- Open trades with live unrealised P&L updating every 3 seconds
+- Persists between sessions (JSON file, atomic writes)
+- Open trades with live unrealised P&L via WebSocket
 - Closed trades showing final P&L in USDT and %
 - Equity curve chart
-- Trade statistics: total, open, wins, losses, win rate, avg win/loss, best/worst trade, profit factor, total P&L
-- Summary bar: open count, closed count, win rate, total P&L
-- Right-click: Close, Edit, Delete, Open on Binance
-- Close dialog with pre-filled current price
-- Edit dialog for manual adjustments
-- Export to CSV
-- Remove Closed button — removes all WIN and LOSS trades, keeps OPEN
-- Multi-select delete
+- Trade statistics: total, open, wins, losses, win rate, avg win/loss, profit factor, total P&L
+- Right-click: Close, Edit, Delete, Open on Binance, Open on TradingView
+- Export to CSV, Remove Closed button, multi-select delete
 
 ### Alerts
 - Auto-scan with configurable interval (30s–1hr)
-- Minimum signal threshold filter (STRONG BUY, BUY, etc.)
-- Sound alerts (WAV playback)
-- Desktop notifications
-- Telegram alerts with bot token + chat ID
-- WhatsApp via PicoClaw integration
-- Alert log panel showing recent signals
-- Signal age and confidence tracking across scans
+- Two-column layout: filters left, notification channels right
+- Filters: min signal, min potential %, min exp move %, max RSI, max BB%, require volume spike
+- Sound alerts, desktop notifications, Telegram, WhatsApp (PicoClaw)
+- Alert log panel, signal age and confidence tracking
 
 ### Config Tab
-- Max price filter, min volume filter
-- Scan interval, candle limit, number of top coins
-- Top Picks count
-- SL % and TP % defaults
-- Browser path for opening charts
-- Binance API key/secret (masked, show/hide toggle)
-- Testnet/Live toggle
-- OCO enable/disable
-- Test Connection button with live balance check
-- Apply Settings button
+- SCAN FILTERS — max price, min volume, interval, top N coins, candles
+- RISK MANAGEMENT — SL%, TP%, TP2%, R/R ratio display
+- TRADE SAFETY — 5 safety rules with individual toggles and thresholds
+- UI APPEARANCE — font size
+- BINANCE API — key/secret, testnet/live toggle, OCO, test connection
 
 ### UI / UX
-- Dark theme throughout — teal/cyan accent, professional trading aesthetic
-- Fixed top bar: title, version badge, subtitle, balance, status, progress, SCAN button
-- Balance label shows `💰 23,934.48 USDT [T]` (T=testnet, L=live) — click to refresh
-- Progress bar during scan (indeterminate spinner for background scans)
-- SCAN button shows `⏳ Scanning...` while active
-- Tab bar: Scanner, Top Picks, Config, Alerts, Trades
-- Custom app icon (teal rounded square, candlestick chart, sparkle)
-- Tooltip headers on scanner table columns
-- Status bar with scan results and trade confirmations
-- Flash effect on strong signals
+- Dark theme — teal/cyan accent, professional trading aesthetic
+- Fixed top bar: title, version, subtitle, balance, scan button
+- Balance shows 💰 23,934.48 USDT [T] — click to refresh
+- Scan dot in status bar: green=idle, blinking blue=scanning
+- WebSocket indicator ⚡ WS in status bar
+- Status messages auto-clear after 10 seconds
+- Custom app icon (teal rounded square)
 
 ---
 
@@ -108,7 +116,7 @@ A professional PyQt6 desktop application for scanning Binance spot markets, iden
 
 ### Install dependencies
 ```bash
-pip install PyQt6 requests
+pip install PyQt6 requests websocket-client
 ```
 
 ### Run from source
@@ -122,31 +130,14 @@ cd ~/apps/cryptoscanner
 ./build.sh
 ```
 
-The script will:
-- Check and install PyQt6, requests, PyInstaller if missing
-- Build a standalone binary → `dist/linux/crypto_scanner`
-- Copy to `binary/crypto_scanner` for releases
-- Install to `~/.local/bin/crypto_scanner` — run from anywhere
-- Register in app menu (requires `crypto_scanner.desktop`)
-
-After building, launch with:
-```bash
-crypto_scanner
-```
-Or find it in your app menu under **Finance**.
+After building, launch with `crypto_scanner` or from app menu under Finance.
 
 ### First-time app menu setup
-Only needed once after first build:
 ```bash
-# Install icon
 mkdir -p ~/.local/share/icons
 cp ~/apps/cryptoscanner/app_icon.png ~/.local/share/icons/crypto_scanner.png
-
-# Install desktop entry
 sed "s|%h|$HOME|g" ~/apps/cryptoscanner/crypto_scanner.desktop \
     > ~/.local/share/applications/crypto_scanner.desktop
-
-# Refresh app menu
 update-desktop-database ~/.local/share/applications
 ```
 
@@ -156,27 +147,11 @@ update-desktop-database ~/.local/share/applications
 
 ```
 1. Edit code
-        ↓
-2. Test:   python crypto_scanner.py
-        ↓
-3. Build:  ./build.sh
-        ↓
-4. Launch: crypto_scanner   (or from app menu)
-        ↓
-5. Release: ./push_release.sh  →  GitHub Actions builds all platforms
+2. Test:    python crypto_scanner.py
+3. Build:   ./build.sh
+4. Launch:  crypto_scanner
+5. Release: ./push_release.sh
 ```
-
-### Releasing a new version
-```bash
-./push_release.sh
-```
-When prompted:
-- Enter version number (e.g. `2.0.2`)
-- Confirm APP_VERSION update — script patches it automatically
-- Enter commit message
-- Confirm
-
-GitHub Actions will then build binaries for Linux, Windows and macOS automatically and attach them to the release.
 
 ---
 
@@ -184,68 +159,38 @@ GitHub Actions will then build binaries for Linux, Windows and macOS automatical
 
 ### First launch
 1. App opens and begins scanning automatically
-2. Go to **Config** tab → **BINANCE API** section
-3. Enter your API Key and Secret
-4. Keep **Testnet Mode** enabled for testing
-5. Click **Test Connection** to verify
-6. Click **Apply Settings**
+2. Config tab → BINANCE API → enter API Key and Secret
+3. Keep Testnet Mode enabled for testing
+4. Click Test Connection → Apply Settings
 
 ### Testnet setup
-- Create API keys at `testnet.binance.vision` (login with GitHub)
-- Fund testnet USDT by running `refill_testnet.py` (sells testnet BTC for USDT)
+- Create keys at testnet.binance.vision (login with GitHub)
+- Fund USDT by running `refill_testnet.py` (sells testnet BTC for USDT)
 
 ### Going Live
-1. Create API keys at `binance.com` → Account → API Management
-2. Enable **TRADE** and **USER_DATA** permissions only — never enable withdrawal
-3. In Config tab: paste live keys, click the green TESTNET button → confirm → it turns red LIVE
-4. Click Test Connection to verify real balance
-5. Start with small position sizes
+1. Create keys at binance.com → API Management
+2. Enable TRADE and USER_DATA permissions only — never withdrawal
+3. Config tab: paste keys, click TESTNET button → confirm → turns red LIVE
+4. Test Connection → verify real balance
+5. Review Trade Safety settings before first live trade
 
 ---
 
 ## How Trading Works
 
 ```
-1. Scanner identifies STRONG BUY signal on COSUSDT
-2. Right-click → LONG (buy COS)
-3. Dialog shows: balance, entry price, SL/TP fields
+1. Scanner finds STRONG BUY or PRE-BREAKOUT signal
+2. Trade Safety checks pass (signal held 2 scans, BTC not falling, etc.)
+3. Right-click → LONG
 4. Confirm → market BUY placed on Binance
 5. OCO placed automatically: TP limit + SL stop
-6. Trade appears in Trades tab with live P&L
-7. Every 3 seconds: app checks if TP hit → market SELL + cancel OCO
-8. If SL hit: OCO on Binance fires automatically (even if app closed)
+6. Trade appears with live P&L via WebSocket
+7. WebSocket detects TP hit → market SELL + cancel OCO (milliseconds)
+8. If SL hit: OCO fires on Binance automatically (even if app closed)
 ```
 
 ### OCO Protection
-OCO (One Cancels the Other) places two orders simultaneously on Binance:
-- A limit sell at your TP price
-- A stop-loss sell at your SL price
-
-When one executes, the other cancels automatically. This means **your stop-loss is always active on Binance's servers** — even if the app crashes, your PC restarts, or your internet drops.
-
----
-
-## File Structure
-
-```
-cryptoscanner/
-├── crypto_scanner.py          # Main application
-├── app_icon.png               # App icon (required alongside .py)
-├── app_icon.ico               # Windows icon
-├── README.md                  # This file
-├── tutorial.html              # Usage tutorial
-├── crypto_scanner_guide.odt   # Full guide
-├── build.sh                   # Linux binary build script
-├── push_release.sh            # GitHub release script (not tracked)
-└── binary/                    # Built binaries
-```
-
-### Runtime files (created automatically)
-```
-~/.crypto_scanner_trades.json     # Trade journal
-~/.crypto_scanner_crash.log       # Crash log (if any)
-~/.crypto_scanner_trade_log.txt   # Audit trail of all orders
-```
+Your stop-loss lives on Binance's servers. Even if the app crashes, your PC restarts, or internet drops — Binance will automatically sell if price hits your SL.
 
 ---
 
@@ -253,31 +198,52 @@ cryptoscanner/
 
 | Component | Description |
 |-----------|-------------|
-| `Scanner` | Fetches Binance tickers, calculates all indicators |
-| `ScanWorker` | QThread wrapper for manual SCAN button |
-| `AlertEngine` | Background thread: auto-scans every N seconds, fires alerts |
-| `BinanceTrader` | All order operations: buy, sell, OCO, balance, symbol info |
-| `CryptoScannerWindow` | Main PyQt6 window, all UI |
-| Trade monitor | QTimer every 3s: fetches prices, checks TP/SL, updates P&L |
+| Scanner | Fetches tickers, calculates indicators |
+| ScanWorker | QThread for manual scan button |
+| AlertEngine | Background auto-scan thread |
+| BinanceTrader | All order operations |
+| BinanceWebSocketPrices | Real-time price feed |
+| CryptoScannerWindow | Main UI window |
+| check_trade_safety() | Validates safety rules before trades |
 
-### Scan flow
+---
+
+## File Structure
+
+### App files
 ```
-AlertEngine._loop()
-  → Scanner.start_scan()          # fetch tickers + candles
-  → analyse() per coin            # indicators + scoring
-  → scan_done.emit(results)       # → UI update (smooth, no table clear)
-  → sleep(interval_sec)
-  → repeat
+cryptoscanner/
+├── crypto_scanner.py          # Main application
+├── app_icon.png               # App icon (required alongside .py)
+├── app_icon.ico               # Windows icon
+├── crypto_scanner.desktop     # Linux app menu entry
+├── README.md                  # This file
+├── tutorial.html              # Usage tutorial
+├── crypto_scanner_guide.odt   # Full guide
+├── build.sh                   # Linux binary build script
+├── push_release.sh            # GitHub release script
+└── binary/                    # Built binaries
 ```
 
-### Trade monitor (every 3 seconds, always running)
+### Runtime data directory (created automatically on first launch)
+
+| OS | Path |
+|----|------|
+| Linux | `~/.config/CryptoScalper/` |
+| Windows | `%APPDATA%\CryptoScalper\` |
+| macOS | `~/Library/Application Support/CryptoScalper/` |
+
 ```
-_fetch_open_trade_prices()
-  → GET /api/v3/ticker/price per open symbol
-  → update _live_prices
-  → _check_sltp_hits()            # execute sell if TP crossed
-  → _refresh_trades_table()       # update P&L display
+CryptoScalper/
+└── logs/
+    ├── trades.json                    # trade journal (persists between sessions)
+    ├── trade_log.txt                  # full order audit trail
+    ├── signal_log_2026-03-17.csv      # today's scan signal log
+    ├── signal_log_2026-03-16.csv      # yesterday's log
+    └── crash.log                      # crash reports (only if app crashes)
 ```
+
+Signal logs are created daily and files older than 7 days are deleted automatically. Open today's log from Config tab → Export Scan Results → **📋 Open Signal Log**.
 
 ---
 
@@ -286,48 +252,50 @@ _fetch_open_trade_prices()
 | Indicator | Description |
 |-----------|-------------|
 | RSI | 14-period relative strength index |
-| StochRSI | Stochastic of RSI, 14-period |
-| MACD | 12/26/9 MACD histogram |
-| Bollinger Bands | 20-period, 2 std dev; BB% position |
+| StochRSI | Stochastic of RSI |
+| MACD | 12/26/9 histogram |
+| Bollinger Bands | 20-period, 2 std dev; BB% and width |
 | ATR | 14-period average true range |
-| Volume | 24h quote volume vs average |
-| Candlestick patterns | Doji, Hammer, Engulfing, Morning/Evening Star |
+| Volume ratio | vs 20-period average |
+| Candlestick patterns | Doji, Hammer, Engulfing, Star patterns |
 | Support/Resistance | Local swing highs/lows |
-| 1H trend | Independent 1-hour timeframe fetch |
-| Signal age | How many consecutive scans at same signal |
-| Confidence | Confluence score 0–100% |
+| 1H trend | Independent hourly timeframe |
+| PRE-BREAKOUT | BB squeeze + volume + RSI + support |
 
 ---
 
 ## Changelog
 
-### v2.0.0 (current)
-- Live trading: market BUY, OCO stop-loss, market SELL
-- Testnet and Live mode toggle
-- Trade journal with real-time P&L (3s refresh)
-- Auto TP/SL detection every 3 seconds
-- SL/TP % fields in trade dialog (bidirectional sync with price fields)
-- USDT balance in top bar
-- Auto-scan on launch (no manual scan needed)
-- Symbol pre-check before order (testnet vs live)
-- Journal fallback for coins not on testnet
-- Remove Closed button (WIN + LOSS)
-- Binance URL opens 5m chart
-- Fixed symbol handling for ROBO_USDT style symbols
-- App icon (teal rounded square)
-- Global crash handler → `~/.crypto_scanner_crash.log`
-- Atomic trade file saves (no corruption)
-- All critical methods wrapped in try/except
-- Division guards on all indicators
+### v2.2.0 (current)
+- **Signal Audit Log** — every scan logs all coins to `CryptoScalper/logs/signal_log_YYYY-MM-DD.csv` with 22 columns including RSI, BB%, ADR, vol_ratio, alert_fired, safety_blocked, safety_reason — full audit trail for post-analysis
+- **Daily log rotation** — new file each day, files older than 7 days auto-deleted — never grows unmanageable
+- **Cross-platform data directory** — app data stored in OS-native location (Linux: `~/.config/CryptoScalper/`, Windows: `%APPDATA%\CryptoScalper\`, macOS: `~/Library/Application Support/CryptoScalper/`)
+- **ADR Filter (Average Daily Range)** — calculates avg candle range % per coin, filters out flat/choppy coins. Default 0.5% for 5m candles
+- **BUY/SELL renamed** — LONG renamed to BUY, SHORT disabled and marked "coming soon (margin)"
+- **Open Signal Log button** in Config tab — opens today's CSV, shows row count and total size
+- **Config tab 2-column layout** — setting groups arranged side by side
+
+### v2.1.0
+- PRE-BREAKOUT signal detection (BB squeeze + volume + RSI + support)
+- WebSocket real-time price feed (wss://stream.binance.com:9443)
+- Trade Safety System — 5 individually toggleable rules (signal persistence, BTC trend, coin trend, max trades, daily loss limit)
+- Open in TradingView local app from right-click menu
+- Alert filters: Max RSI, Max BB%, require volume spike
+- Two-column Alerts tab layout
+
+### v2.0.1
+- Live trading: market BUY, OCO, market SELL
+- Testnet/Live mode toggle
+- Trade journal with real-time P&L
+- Auto TP/SL detection
+- SL/TP % fields in trade dialog
+- Balance in top bar, auto-scan on launch
+- Crash handler, atomic trade saves
 
 ### v1.3.2
 - RSI/StochRSI/MACD/BB scoring
-- Top Picks cards
-- Config tab with all settings
-- Alerts: sound, desktop, Telegram, WhatsApp
-- Trades journal with P&L
-- Sparklines, detail popup, column tooltips
-- Multi-select delete, SL/TP % fields
+- Top Picks, Config, Alerts (sound/desktop/Telegram/WhatsApp)
+- Trades journal, sparklines, detail popup
 
 ---
 
