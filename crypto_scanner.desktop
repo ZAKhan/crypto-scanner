@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=2.0.1
+Type=Application
+Name=Crypto Scalper Scanner
+Comment=Binance spot market scanner with live trading
+Exec=%h/.local/bin/crypto_scanner
+Icon=%h/.local/share/icons/crypto_scanner.png
+Terminal=false
+Categories=Finance;Network;
+Keywords=crypto;binance;trading;scanner;
+StartupNotify=true
+StartupWMClass=crypto_scanner

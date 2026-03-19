@@ -4,7 +4,6 @@
 #  Usage: ./push_release.sh
 # ═══════════════════════════════════════════════════════════
 
-# Always run from the directory the script lives in
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 GREEN="\033[92m"
@@ -14,13 +13,72 @@ CYAN="\033[96m"
 BOLD="\033[1m"
 RESET="\033[0m"
 
-cd "$REPO_DIR" || { echo -e "${RED}ERROR: Cannot access $REPO_DIR${RESET}"; exit 1; }
+info()  { echo -e "${CYAN}${BOLD}[INFO]${RESET}  $*"; }
+ok()    { echo -e "${GREEN}${BOLD}[ OK ]${RESET}  $*"; }
+warn()  { echo -e "${YELLOW}${BOLD}[WARN]${RESET}  $*"; }
+err()   { echo -e "${RED}${BOLD}[ERR ]${RESET}  $*"; exit 1; }
+step()  { echo -e "\n${BOLD}${CYAN}━━━ $* ━━━${RESET}"; }
+
+cd "$REPO_DIR" || err "Cannot access $REPO_DIR"
 echo -e "${CYAN}Repo: $REPO_DIR${RESET}"
+
+# ── Pre-flight: verify all required files exist ──────────────
+step "Pre-flight checks"
+
+REQUIRED_FILES=(
+    crypto_scanner.py
+    app_icon.png
+    build.sh
+    crypto_scanner.desktop
+    requirements.txt
+    README.md
+    push_release.sh
+)
+
+OPTIONAL_FILES=(
+    tutorial.html
+    crypto_scanner_guide.odt
+)
+
+ALL_OK=true
+echo -e "${BOLD}Required files:${RESET}"
+for f in "${REQUIRED_FILES[@]}"; do
+    if [[ -f "$f" ]]; then
+        echo -e "  ${GREEN}✓${RESET}  $f"
+    else
+        echo -e "  ${RED}✗${RESET}  $f  ← MISSING"
+        ALL_OK=false
+    fi
+done
+
+echo ""
+echo -e "${BOLD}Optional files:${RESET}"
+for f in "${OPTIONAL_FILES[@]}"; do
+    if [[ -f "$f" ]]; then
+        echo -e "  ${GREEN}✓${RESET}  $f"
+    else
+        echo -e "  ${YELLOW}–${RESET}  $f  (not found — skipped)"
+    fi
+done
+
+if [[ "$ALL_OK" == false ]]; then
+    echo ""
+    err "One or more required files are missing. Fix before releasing."
+fi
+
+# ── Check git status ─────────────────────────────────────────
+if ! git rev-parse --git-dir > /dev/null 2>&1; then
+    err "Not a git repository. Run from the project directory."
+fi
+
+ok "All required files present"
 
 # ── Files always included ────────────────────────────────────
 CORE_FILES=(
     crypto_scanner.py
     app_icon.png
+    build.sh
+    crypto_scanner.desktop
     push_release.sh
     requirements.txt
 )
@@ -33,46 +91,50 @@ DOC_FILES=(
 )
 
 # ── Ask for version ──────────────────────────────────────────
-read -p "Enter version number (e.g. 2.0.0): " VERSION
+step "Version"
+
+CURRENT_VER=$(grep -oP '(?<=APP_VERSION = ").*(?=")' crypto_scanner.py 2>/dev/null || echo "unknown")
+echo -e "  Current APP_VERSION in code: ${YELLOW}$CURRENT_VER${RESET}"
+echo ""
+read -p "Enter release version (e.g. 2.2.0): " VERSION
 TAG="v$VERSION"
 
 if git tag | grep -q "^$TAG$"; then
-    echo -e "${RED}ERROR: Tag $TAG already exists. Choose a different version.${RESET}"
-    exit 1
+    err "Tag $TAG already exists. Choose a different version."
+fi
+
+# ── Update APP_VERSION if needed ─────────────────────────────
+if [[ "$CURRENT_VER" != "v$VERSION" && "$CURRENT_VER" != "$VERSION" ]]; then
+    echo ""
+    read -p "Update APP_VERSION to v$VERSION in crypto_scanner.py? (y/n): " UPDATE_VER
+    if [[ "$UPDATE_VER" == "y" ]]; then
+        sed -i "s/APP_VERSION = \".*\"/APP_VERSION = \"v$VERSION\"/" crypto_scanner.py
+        ok "APP_VERSION updated to v$VERSION"
+    fi
+else
+    ok "APP_VERSION already set to $CURRENT_VER"
 fi
 
 # ── Ask for commit message ───────────────────────────────────
+echo ""
 read -p "Commit message (or Enter for 'release $TAG'): " MSG
 MSG="${MSG:-release $TAG}"
 
-# ── Update APP_VERSION in crypto_scanner.py ─────────────────
-echo ""
-CURRENT_VER=$(grep -oP '(?<=APP_VERSION = ").*(?=")' crypto_scanner.py)
-echo -e "${BOLD}Current APP_VERSION:${RESET} ${YELLOW}$CURRENT_VER${RESET}"
-
-if [[ "$CURRENT_VER" != "$VERSION" ]]; then
-    read -p "Update APP_VERSION to $VERSION in crypto_scanner.py? (y/n): " UPDATE_VER
-    if [[ "$UPDATE_VER" == "y" ]]; then
-        sed -i "s/APP_VERSION = \".*\"/APP_VERSION = \"$VERSION\"/" crypto_scanner.py
-        echo -e "  ${GREEN}✓${RESET} APP_VERSION updated to $VERSION"
-    fi
-fi
-
 # ── Stage core files ─────────────────────────────────────────
-echo ""
-echo -e "${BOLD}Staging core files:${RESET}"
+step "Staging files"
+
+echo -e "${BOLD}Core files:${RESET}"
 for f in "${CORE_FILES[@]}"; do
     if [[ -f "$f" ]]; then
         git add "$f"
         echo -e "  ${GREEN}+${RESET} $f"
     else
-        echo -e "  ${RED}✗${RESET} $f  (NOT FOUND)"
+        echo -e "  ${YELLOW}–${RESET} $f  (skipped — not found)"
     fi
 done
 
-# ── Stage docs only if modified ──────────────────────────────
 echo ""
-echo -e "${BOLD}Staging modified docs:${RESET}"
+echo -e "${BOLD}Docs (only if modified):${RESET}"
 for f in "${DOC_FILES[@]}"; do
     if [[ -f "$f" ]]; then
         git add -f "$f" 2>/dev/null
@@ -88,7 +150,7 @@ for f in "${DOC_FILES[@]}"; do
     fi
 done
 
-# ── Show staged files ────────────────────────────────────────
+# ── Show what will be committed ──────────────────────────────
 echo ""
 echo -e "${BOLD}Files in this commit:${RESET}"
 git diff --cached --name-only | while read -r f; do
@@ -97,29 +159,30 @@ done
 
 STAGED=$(git diff --cached --name-only | wc -l)
 if [[ "$STAGED" -eq 0 ]]; then
-    echo -e "${YELLOW}Nothing staged — no changes to commit. Aborting.${RESET}"
+    warn "Nothing staged — no changes to commit. Aborting."
     exit 0
 fi
 
-echo ""
+# ── Final confirmation ───────────────────────────────────────
+step "Confirm"
 echo -e "  Tag     : ${CYAN}${TAG}${RESET}"
 echo -e "  Message : ${CYAN}${MSG}${RESET}"
+echo -e "  Files   : ${CYAN}${STAGED} file(s)${RESET}"
 echo ""
-
-# ── Confirm ──────────────────────────────────────────────────
 read -p "Proceed? (y/n): " CONFIRM
 [[ "$CONFIRM" != "y" ]] && echo "Aborted." && exit 0
 
 # ── Commit, push, tag ────────────────────────────────────────
+step "Pushing"
+
 git commit -m "$MSG"
 git push
 
 git tag "$TAG"
 git push origin "$TAG"
 
-echo ""
-echo -e "${GREEN}${BOLD}Done!${RESET} Released ${CYAN}$TAG${RESET}."
-echo ""
-echo -e "  Build progress : https://github.com/ZAKhan/crypto-scanner/actions"
-echo -e "  Create release : https://github.com/ZAKhan/crypto-scanner/releases/new?tag=$TAG"
+step "Done"
+echo -e "  Released : ${GREEN}${TAG}${RESET}"
+echo -e "  Actions  : https://github.com/ZAKhan/crypto-scanner/actions"
+echo -e "  Release  : https://github.com/ZAKhan/crypto-scanner/releases/new?tag=$TAG"
 echo ""

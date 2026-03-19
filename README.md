@@ -1,4 +1,4 @@
-# Crypto Scalper Scanner v2.2.0
+# Crypto Scalper Scanner v2.4.0
 
 A professional PyQt6 desktop application for scanning Binance spot markets, identifying high-probability scalping opportunities, and executing live trades with automated stop-loss protection.
 
@@ -84,11 +84,25 @@ When a safety rule blocks a trade, a dialog explains why and offers an override.
 - Export to CSV, Remove Closed button, multi-select delete
 
 ### Alerts
-- Auto-scan with configurable interval (30s–1hr)
+Two sub-tabs inside the Alerts tab:
+
+**📋 Alerts sub-tab** — alert history table (same style as Trades tab)
+- Shows TIME, SYMBOL, SIGNAL, DETAILS, PRICE columns
+- Latest alert always at top — newest first
+- Persists last 20 alerts between app restarts
+- Count badge on tab: `📋 Alerts (5)`
+- Auto-switches to this tab when a new alert fires
+
+**⚙ Settings sub-tab** — all alert configuration
 - Two-column layout: filters left, notification channels right
-- Filters: min signal, min potential %, min exp move %, max RSI, max BB%, require volume spike
+- Filters: min signal, min potential %, min exp move %, max RSI, max BB%
+- **Min ADR %** (0.5%) — skip flat coins with tiny avg candle range
+- **Min Vol Ratio** (0.8x) — blocks 70-80% of false alerts (dying volume)
+- **Block Downtrend pattern** — skip when candlestick shows Downtrend ↓
+- **Post-spike cooldown** — coin spiked >15% → silence for 2 hours
+- **Per-coin cooldown** (30 min) — ROBO: 82 alerts → 2 per day
+- **Require MACD rising** (optional) — only alert if momentum building
 - Sound alerts, desktop notifications, Telegram, WhatsApp (PicoClaw)
-- Alert log panel, signal age and confidence tracking
 
 ### Config Tab
 - SCAN FILTERS — max price, min volume, interval, top N coins, candles
@@ -266,7 +280,52 @@ Signal logs are created daily and files older than 7 days are deleted automatica
 
 ## Changelog
 
-### v2.2.0 (current)
+### v2.4.0 (current)
+**Outcome Tracking**
+- Background `OutcomeTracker` thread checks price at 30min, 1h, 4h after every alert fires
+- 7 new signal log columns: `price_30m`, `pct_30m`, `price_1h`, `pct_1h`, `price_4h`, `pct_4h`, `outcome`
+- Outcome logic: WIN (≥ +3% in 1h) / LOSS (≤ -2% in 1h) / FLAT (between)
+- **📊 Outcome Analysis** dialog in Config tab — win rate, avg move, per-symbol W/L/F breakdown
+- Atomic CSV updates — outcome written back without corrupting existing rows
+
+**Alerts Tab Redesign**
+- Split into two sub-tabs: **📋 Alerts** (history) and **⚙ Settings** (configuration)
+- Alerts history now uses a proper table — same look as Trades tab, always shows headers even when empty
+- Columns: TIME, SYMBOL, SIGNAL, DETAILS, PRICE
+- Last 20 alerts **saved and restored** between app restarts
+- Count badge on tab updates live: `📋 Alerts (5)`
+- Auto-switches to Alerts tab when new alert fires
+
+**Trades Tab — Live Price Fix**
+- Added dedicated **LIVE $** column — shows current price for open trades, updates in real-time
+- **EXIT $** column now only shows when trade is closed (not cluttered with live prices)
+- P&L column cleaned up — no more `▶` prefix, no price embedded in P&L text
+- LIVE $ and EXIT $ columns fixed at equal width (130px)
+
+**WebSocket Price Feed — Complete Fix**
+- Root cause found: cross-thread `price_update` signal was dropped silently — now uses `Qt.ConnectionType.QueuedConnection`
+- Open trade symbols now subscribe to **individual per-symbol streams** (`enjusdt@miniTicker`) — fires on every price change, not every 3s
+- All-market stream (`!miniTicker@arr@3000ms`) retained for scanner coins
+- REST polling kept as **always-on safety net** — fetches open trade prices every 3s regardless of WebSocket state
+- UI flush throttle reduced: 500ms → 100ms
+- TradingView link now uses `xdg-open` — works when TradingView is already open
+
+**Bug Fixes**
+- `QTextEdit` not imported — fixed (crashed Outcome Analysis dialog)
+- `datetime` not JSON serializable in trade export — fixed
+- WebSocket subscription gaps on app startup — open trade symbols now subscribed immediately on launch
+
+### v2.3.0
+- **5 alert quality fixes** based on real signal log analysis (96% reduction in false alerts)
+- **Fix 1 — Block Downtrend pattern** — skip alerts when candlestick pattern shows Downtrend ↓
+- **Fix 2 — Min volume ratio 0.8x** — biggest fix, blocked 70-80% of bad alerts. Coins like ROBO/ANIME with vol 0.3-0.7x during a bleed are now filtered
+- **Fix 3 — Post-spike cooldown** — if coin spiked >15% in last 3h, block alerts for 2 hours (prevents chasing dump-after-pump)
+- **Fix 4 — Require MACD rising** — optional filter, only alert if MACD histogram is rising
+- **Fix 5 — Per-coin 30min cooldown** — once a coin alerts, block it for 30 minutes. ROBO went from 82 alerts → 2 alerts in one day
+- **Signal Audit Log analysis** — all fixes validated against real Mar 17 and Mar 18 logs before shipping
+- Alert history now shows **latest at top**
+
+### v2.2.0
 - **Signal Audit Log** — every scan logs all coins to `CryptoScalper/logs/signal_log_YYYY-MM-DD.csv` with 22 columns including RSI, BB%, ADR, vol_ratio, alert_fired, safety_blocked, safety_reason — full audit trail for post-analysis
 - **Daily log rotation** — new file each day, files older than 7 days auto-deleted — never grows unmanageable
 - **Cross-platform data directory** — app data stored in OS-native location (Linux: `~/.config/CryptoScalper/`, Windows: `%APPDATA%\CryptoScalper\`, macOS: `~/Library/Application Support/CryptoScalper/`)
