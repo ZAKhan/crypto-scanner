@@ -3456,7 +3456,7 @@ class CryptoScannerWindow(QMainWindow):
         side   = trade["side"]
         status = trade["status"]
 
-        title_act = menu.addAction(f"  {"BUY" if side == "LONG" else "SELL"} {sym}")
+        title_act = menu.addAction(f"  {'BUY' if side == 'LONG' else 'SELL'} {sym}")
         title_act.setEnabled(False)
         menu.addSeparator()
 
@@ -3517,7 +3517,7 @@ class CryptoScannerWindow(QMainWindow):
         api_ready = bool(TRADING_CFG["api_key"] and TRADING_CFG["api_secret"])
 
         dlg = QDialog(self)
-        dlg.setWindowTitle(f"Open {"BUY" if side == "LONG" else "SELL"} — {sym}")
+        dlg.setWindowTitle(f"Open {'BUY' if side == 'LONG' else 'SELL'} — {sym}")
         dlg.setModal(True)
         dlg.setMinimumWidth(420)
         dlg.setStyleSheet(f"background:{DARK2}; color:{WHITE};")
@@ -3755,7 +3755,7 @@ class CryptoScannerWindow(QMainWindow):
             vlay.addWidget(oco_note)
 
         btn_row = QHBoxLayout()
-        ok_btn = QPushButton(f"{icon}  Confirm {"BUY" if side == "LONG" else "SELL"}")
+        ok_btn = QPushButton(f"{icon}  Confirm {'BUY' if side == 'LONG' else 'SELL'}")
         ok_btn.setStyleSheet(
             f"background:{'#002a1a' if side=='LONG' else '#2a0010'}; color:{accent}; "
             f"border:1px solid {accent}; border-radius:4px; font-weight:700; padding:4px 16px;")
