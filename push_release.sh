@@ -38,6 +38,9 @@ REQUIRED_FILES=(
 OPTIONAL_FILES=(
     tutorial.html
     crypto_scanner_guide.odt
+    crypto_scanner_guide.pdf
+    LICENSE
+    CHANGELOG_v2.4.0.html
 )
 
 ALL_OK=true
