@@ -51,7 +51,7 @@ try:
 except ImportError:
     HAS_CHARTS = False
 
-APP_VERSION = "v2.4.1"
+APP_VERSION = "v2.4.2"
 
 # ─────────────────────────────────────────────────────────────
 #  CROSS-PLATFORM DATA DIRECTORY
@@ -1174,6 +1174,16 @@ SAFETY_CFG = {
     "signal_persistence":       True,
     "btc_trend_check":          True,
     "btc_drop_pct":             2.0,
+    # Fix 1 — BTC drop cooldown
+    "btc_drop_cooldown_mins":   60,
+    "btc_recovery_pct":         1.5,
+    # Fix 2 — 1h trend freshness
+    "trend_1h_freshness":       True,
+    "trend_1h_stale_pct":       1.5,
+    # Fix 3 — per-symbol recovery gate
+    "symbol_recovery_gate":     True,
+    "symbol_recovery_pct":      1.0,
+    "symbol_recovery_expiry_mins": 30,
     "max_open_trades":          True,
     "max_open_trades_count":    3,
     "daily_loss_limit":         True,
@@ -1181,8 +1191,21 @@ SAFETY_CFG = {
     "coin_trend_check":         True,
     "coin_drop_pct":            5.0,
 }
-_daily_loss_tracker = {"date": "", "loss": 0.0}
+_daily_loss_tracker      = {"date": "", "loss": 0.0}
 _spike_cooldown_tracker  = {}  # symbol -> timestamp of spike detection
+
+import time as _time
+_btc_drop_state = {
+    "active":       False,
+    "trigger_time": 0.0,
+    "drop_low":     float("inf"),
+}
+_symbol_block_state = {}
+
+def _get_symbol_block(symbol: str) -> dict:
+    if symbol not in _symbol_block_state:
+        _symbol_block_state[symbol] = {"blocked": False, "block_time": 0.0, "block_price": 0.0}
+    return _symbol_block_state[symbol]
 _coin_alert_tracker      = {}  # symbol -> timestamp of last alert fired
 
 
@@ -1191,26 +1214,90 @@ def check_trade_safety(r, trades, balance_usdt=0.0):
     Run all enabled safety checks before placing a trade.
     Returns (allowed: bool, reason: str)
     """
-    sym    = r.get("symbol", "")
-    signal = r.get("signal", "")
+    sym     = r.get("symbol", "")
+    signal  = r.get("signal", "")
+    is_long = "BUY" in signal.upper()
+    now_ts  = _time.time()
 
-    # Layer 5 — Signal persistence (must hold 2+ scans)
+    # Layer 5 — Signal persistence
     if SAFETY_CFG["signal_persistence"]:
         conf = r.get("signal_conf", 1)
         if conf < 2:
             return False, f"Signal not confirmed yet ({conf}/2 scans)"
 
-    # Layer 2 — BTC market condition
+    # Fix 1 — BTC drop cooldown
     if SAFETY_CFG["btc_trend_check"] and sym != "BTCUSDT":
         try:
             import requests as _req
             r2 = _req.get(CFG["base_url"] + "/api/v3/ticker/24hr",
                           params={"symbol": "BTCUSDT"}, timeout=5).json()
-            btc_chg = float(r2.get("priceChangePercent", 0))
-            if btc_chg < -SAFETY_CFG["btc_drop_pct"]:
-                return False, f"BTC dropping {btc_chg:.1f}% — market falling"
+            btc_chg   = float(r2.get("priceChangePercent", 0))
+            btc_price = float(r2.get("lastPrice", 0))
+            cooldown_secs = SAFETY_CFG.get("btc_drop_cooldown_mins", 60) * 60
+            recovery_pct  = SAFETY_CFG.get("btc_recovery_pct", 1.5)
+            if _btc_drop_state["active"] and btc_price < _btc_drop_state["drop_low"]:
+                _btc_drop_state["drop_low"] = btc_price
+            if _btc_drop_state["active"]:
+                elapsed   = now_ts - _btc_drop_state["trigger_time"]
+                low       = _btc_drop_state["drop_low"]
+                recovered = ((btc_price - low) / low * 100) if low > 0 else 0
+                if elapsed >= cooldown_secs or recovered >= recovery_pct:
+                    _btc_drop_state["active"] = False
+            if not _btc_drop_state["active"] and btc_chg < -SAFETY_CFG["btc_drop_pct"]:
+                _btc_drop_state["active"]       = True
+                _btc_drop_state["trigger_time"] = now_ts
+                _btc_drop_state["drop_low"]     = btc_price
+            if _btc_drop_state["active"] and is_long:
+                elapsed_min = (now_ts - _btc_drop_state["trigger_time"]) / 60
+                low         = _btc_drop_state["drop_low"]
+                recovered   = ((btc_price - low) / low * 100) if low > 0 else 0
+                return False, (
+                    f"BTC drop cooldown — {elapsed_min:.0f}/{SAFETY_CFG.get('btc_drop_cooldown_mins', 60)} min  "
+                    f"| BTC recovery from low: {recovered:.1f}% (need {recovery_pct}%)"
+                )
         except Exception:
-            pass  # don't block on network error
+            pass
+
+    # Fix 2 — 1h trend freshness
+    if is_long and SAFETY_CFG.get("trend_1h_freshness", True) and r.get("trend_1h") == "up":
+        stale_threshold = SAFETY_CFG.get("trend_1h_stale_pct", 1.5)
+        price = r.get("price", 0)
+        pct_from_1h = None
+        try:
+            import requests as _req
+            kl = _req.get(CFG["base_url"] + "/api/v3/klines",
+                          params={"symbol": sym, "interval": "1h", "limit": 2},
+                          timeout=5).json()
+            if kl and len(kl) >= 1:
+                open_1h = float(kl[-1][1])
+                if open_1h > 0:
+                    pct_from_1h = (price - open_1h) / open_1h * 100
+        except Exception:
+            pass
+        if pct_from_1h is not None and pct_from_1h <= -stale_threshold:
+            return False, (
+                f"trend_1h='up' is stale — {sym} is {pct_from_1h:.1f}% below its 1h open "
+                f"(threshold: -{stale_threshold}%)"
+            )
+
+    # Fix 3 — Per-symbol recovery gate
+    if is_long and SAFETY_CFG.get("symbol_recovery_gate", True):
+        sb = _get_symbol_block(sym)
+        if sb["blocked"]:
+            expiry_secs   = SAFETY_CFG.get("symbol_recovery_expiry_mins", 30) * 60
+            recovery_need = SAFETY_CFG.get("symbol_recovery_pct", 1.0)
+            elapsed       = now_ts - sb["block_time"]
+            cur_price     = r.get("price", 0)
+            block_price   = sb["block_price"]
+            recovered_pct = ((cur_price - block_price) / block_price * 100) if block_price > 0 else 0
+            if elapsed >= expiry_secs or recovered_pct >= recovery_need:
+                sb["blocked"] = False
+            else:
+                return False, (
+                    f"{sym} recovery gate active — need +{recovery_need}% from block price, "
+                    f"currently {recovered_pct:+.2f}%  "
+                    f"({elapsed/60:.0f}/{SAFETY_CFG.get('symbol_recovery_expiry_mins', 30)} min)"
+                )
 
     # Layer 2 — Coin 24h trend
     if SAFETY_CFG["coin_trend_check"]:
@@ -1235,6 +1322,14 @@ def check_trade_safety(r, trades, balance_usdt=0.0):
             return False, f"Daily loss limit reached (${_daily_loss_tracker['loss']:.2f})"
 
     return True, ""
+
+
+def safety_mark_symbol_blocked(symbol: str, price: float):
+    """Call when safety_blocked=True fires — starts the per-symbol recovery gate."""
+    sb = _get_symbol_block(symbol)
+    sb["blocked"]     = True
+    sb["block_time"]  = _time.time()
+    sb["block_price"] = price
 
 def record_trade_loss(pnl: float):
     """Call after a trade closes at a loss to update daily tracker."""
@@ -1351,6 +1446,7 @@ def log_scan_results(results, alert_cfg=None, safety_cfg=None, trades=None):
                     if not ok:
                         safety_blocked = True
                         safety_reason  = reason
+                        safety_mark_symbol_blocked(r.get("symbol", ""), r.get("price", 0))
 
                 writer.writerow({
                     "timestamp":    now,
@@ -3423,13 +3519,7 @@ class CryptoScannerWindow(QMainWindow):
             open_url(f"https://www.binance.com/en/trade/{sym_url}USDT?type=spot&interval=5m")
         elif action == tv_act:
             sym_url = sym.replace("_", "")
-            import subprocess
-            _tv_url = f"https://www.tradingview.com/chart/?symbol=BINANCE:{sym_url}USDT&interval=5"
-            try:
-                # Try xdg-open first — works whether TradingView is open or not
-                subprocess.Popen(["xdg-open", _tv_url])
-            except Exception:
-                subprocess.Popen(["tradingview", "--url", _tv_url])
+            open_url(f"https://www.tradingview.com/chart/?symbol=BINANCE:{sym_url}USDT&interval=5")
 
     # ── Context menu on TRADES table ────────────────────────
     def _trades_context_menu(self, pos):
@@ -3491,13 +3581,66 @@ class CryptoScannerWindow(QMainWindow):
             open_url(f"https://www.binance.com/en/trade/{sym_url}USDT?type=spot&interval=5m")
         elif action == tv_act2:
             sym_url = trade["symbol"].replace("_USDT","").replace("USDT","").replace("_","")
-            import subprocess
-            _tv_url = f"https://www.tradingview.com/chart/?symbol=BINANCE:{sym_url}USDT&interval=5"
-            try:
-                # Try xdg-open first — works whether TradingView is open or not
-                subprocess.Popen(["xdg-open", _tv_url])
-            except Exception:
-                subprocess.Popen(["tradingview", "--url", _tv_url])
+            open_url(f"https://www.tradingview.com/chart/?symbol=BINANCE:{sym_url}USDT&interval=5")
+
+    # ── Context menu on ALERTS history table ────────────────
+    def _alerts_context_menu(self, pos):
+        row = self.alert_log_table.rowAt(pos.y())
+        if row < 0:
+            return
+        time_item = self.alert_log_table.item(row, 0)
+        if time_item is None:
+            return
+        data = time_item.data(Qt.ItemDataRole.UserRole)
+        if not data:
+            return
+
+        sym    = data.get("symbol", "")  # stored without USDT (e.g. "KAT")
+        sig    = data.get("signal", "")
+        price  = data.get("price", 0)
+        if not sym:
+            return
+
+        sym_full = sym.replace("_", "") + "USDT"   # e.g. "KATUSDT"
+        sym_display = sym.replace("USDT", "")       # clean display label
+
+        # Build a result dict compatible with _record_trade (needs full symbol)
+        r = {"symbol": sym_full, "signal": sig, "price": price,
+             "signal_conf": 2, "trend_1h": "flat"}
+
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            f"QMenu {{ background:{CARD}; border:1px solid {BORDER}; color:{WHITE}; padding:4px; }}"
+            f"QMenu::item {{ padding:6px 20px; border-radius:3px; }}"
+            f"QMenu::item:selected {{ background:{ACCENT}; color:{DARK}; }}"
+            f"QMenu::separator {{ height:1px; background:{BORDER}; margin:4px 8px; }}"
+        )
+
+        title_act = menu.addAction(f"  {sig}  {sym_display}")
+        title_act.setEnabled(False)
+        menu.addSeparator()
+
+        long_act  = menu.addAction(f"📈  BUY  {sym_display}")
+        short_act = menu.addAction(f"📉  SELL  {sym_display}  (margin — coming soon)")
+        short_act.setEnabled(False)
+        if "BUY" in sig:
+            long_act.setText(f"📈  BUY  {sym_display}  ← {sig}")
+        elif "SELL" in sig:
+            short_act.setText(f"📉  SELL  {sym_display}  ← {sig}  (coming soon)")
+        menu.addSeparator()
+
+        binance_act = menu.addAction(f"🌐  Open {sym_display} on Binance")
+        tv_act      = menu.addAction(f"📈  Open {sym_display} on TradingView")
+
+        action = menu.exec(self.alert_log_table.viewport().mapToGlobal(pos))
+        if action == long_act:
+            self._record_trade(r, "LONG")
+        elif action == binance_act:
+            sym_url = sym.replace("_", "") + "USDT"
+            open_url(f"https://www.binance.com/en/trade/{sym_url}?type=spot&interval=5m")
+        elif action == tv_act:
+            sym_url = sym.replace("_", "") + "USDT"
+            open_url(f"https://www.tradingview.com/chart/?symbol=BINANCE:{sym_url}&interval=5")
 
     # ── Record trade from scanner right-click ───────────────
     def _record_trade(self, r, side):
@@ -5122,6 +5265,8 @@ class CryptoScannerWindow(QMainWindow):
         self.alert_log_table.setAlternatingRowColors(False)
         self.alert_log_table.setSortingEnabled(False)
         self.alert_log_table.setShowGrid(True)
+        self.alert_log_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.alert_log_table.customContextMenuRequested.connect(self._alerts_context_menu)
         al_hdr = self.alert_log_table.horizontalHeader()
         al_hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         al_hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
@@ -5303,6 +5448,13 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
             return item
 
         tbl.setItem(0, 0, cell(alert.get("time", ""), DIM))
+        # Store full symbol (with USDT) and signal in UserRole for context menu
+        time_item = tbl.item(0, 0)
+        time_item.setData(Qt.ItemDataRole.UserRole, {
+            "symbol": alert.get("symbol", ""),
+            "signal": sig,
+            "price":  alert.get("price", 0),
+        })
         tbl.setItem(0, 1, cell(alert.get("symbol", "").replace("USDT",""), ACCENT, bold=True))
         tbl.setItem(0, 2, cell(sig, col, bold=True))
         tbl.setItem(0, 3, cell(detail_text, DIM))
@@ -5814,13 +5966,80 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         slay.addWidget(self.sf_persistence,  0, 0, 1, 2)
         slay.addWidget(self.sf_btc_check,    1, 0)
         slay.addWidget(self.sf_btc_drop,     1, 1, Qt.AlignmentFlag.AlignLeft)
-        slay.addWidget(self.sf_coin_check,   2, 0)
-        slay.addWidget(self.sf_coin_drop,    2, 1, Qt.AlignmentFlag.AlignLeft)
-        slay.addWidget(self.sf_max_trades,   3, 0)
-        slay.addWidget(self.sf_max_trades_n, 3, 1, Qt.AlignmentFlag.AlignLeft)
-        slay.addWidget(self.sf_daily_loss,   4, 0)
-        slay.addWidget(self.sf_daily_loss_n, 4, 1, Qt.AlignmentFlag.AlignLeft)
-        slay.addWidget(self.sf_reset_btn,    5, 0, 1, 2)
+
+        # Fix 1 — BTC drop cooldown
+        self.sf_btc_cooldown_check = QCheckBox("  BTC drop cooldown")
+        self.sf_btc_cooldown_check.setChecked(True)
+        self.sf_btc_cooldown_check.setStyleSheet(f"color:{WHITE};")
+        self.sf_btc_cooldown_check.setToolTip(
+            "After BTC drop triggers, block new LONGs for this many minutes.\n"
+            "Lifts early if BTC recovers the % set to the right."
+        )
+        self.sf_btc_cooldown_mins = QSpinBox()
+        self.sf_btc_cooldown_mins.setRange(5, 240)
+        self.sf_btc_cooldown_mins.setValue(SAFETY_CFG.get("btc_drop_cooldown_mins", 60))
+        self.sf_btc_cooldown_mins.setSuffix(" min block")
+        self.sf_btc_cooldown_mins.setFixedWidth(120)
+        self.sf_btc_recovery = QDoubleSpinBox()
+        self.sf_btc_recovery.setRange(0.5, 10.0)
+        self.sf_btc_recovery.setValue(SAFETY_CFG.get("btc_recovery_pct", 1.5))
+        self.sf_btc_recovery.setSuffix("% BTC recovery to lift early")
+        self.sf_btc_recovery.setFixedWidth(210)
+        slay.addWidget(self.sf_btc_cooldown_check, 2, 0)
+        slay.addWidget(self.sf_btc_cooldown_mins,  2, 1, Qt.AlignmentFlag.AlignLeft)
+        slay.addWidget(self.sf_btc_recovery,       2, 2, Qt.AlignmentFlag.AlignLeft)
+
+        # Fix 2 — 1h trend freshness
+        self.sf_trend_freshness = QCheckBox("Override stale trend_1h='up' if price fell >")
+        self.sf_trend_freshness.setChecked(SAFETY_CFG.get("trend_1h_freshness", True))
+        self.sf_trend_freshness.setStyleSheet(f"color:{WHITE};")
+        self.sf_trend_freshness.setToolTip(
+            "If the coin has already dropped this much from its 1h candle open,\n"
+            "treat trend_1h='up' as stale and block the LONG."
+        )
+        self.sf_trend_stale = QDoubleSpinBox()
+        self.sf_trend_stale.setRange(0.5, 10.0)
+        self.sf_trend_stale.setValue(SAFETY_CFG.get("trend_1h_stale_pct", 1.5))
+        self.sf_trend_stale.setSuffix("% below 1h open")
+        self.sf_trend_stale.setFixedWidth(160)
+        self.sf_trend_stale.setEnabled(SAFETY_CFG.get("trend_1h_freshness", True))
+        self.sf_trend_freshness.toggled.connect(self.sf_trend_stale.setEnabled)
+        slay.addWidget(self.sf_trend_freshness, 3, 0)
+        slay.addWidget(self.sf_trend_stale,     3, 1, Qt.AlignmentFlag.AlignLeft)
+
+        # Fix 3 — Per-symbol recovery gate
+        self.sf_sym_recovery = QCheckBox("Per-symbol recovery gate after safety block")
+        self.sf_sym_recovery.setChecked(SAFETY_CFG.get("symbol_recovery_gate", True))
+        self.sf_sym_recovery.setStyleSheet(f"color:{WHITE};")
+        self.sf_sym_recovery.setToolTip(
+            "After a safety block fires for a coin, require its price to bounce\n"
+            "by this % before a new LONG is allowed."
+        )
+        self.sf_sym_recovery_pct = QDoubleSpinBox()
+        self.sf_sym_recovery_pct.setRange(0.2, 10.0)
+        self.sf_sym_recovery_pct.setValue(SAFETY_CFG.get("symbol_recovery_pct", 1.0))
+        self.sf_sym_recovery_pct.setSuffix("% bounce required")
+        self.sf_sym_recovery_pct.setFixedWidth(160)
+        self.sf_sym_recovery_pct.setEnabled(SAFETY_CFG.get("symbol_recovery_gate", True))
+        self.sf_sym_expiry = QSpinBox()
+        self.sf_sym_expiry.setRange(5, 120)
+        self.sf_sym_expiry.setValue(SAFETY_CFG.get("symbol_recovery_expiry_mins", 30))
+        self.sf_sym_expiry.setSuffix(" min max lock")
+        self.sf_sym_expiry.setFixedWidth(130)
+        self.sf_sym_expiry.setEnabled(SAFETY_CFG.get("symbol_recovery_gate", True))
+        self.sf_sym_recovery.toggled.connect(self.sf_sym_recovery_pct.setEnabled)
+        self.sf_sym_recovery.toggled.connect(self.sf_sym_expiry.setEnabled)
+        slay.addWidget(self.sf_sym_recovery,     4, 0)
+        slay.addWidget(self.sf_sym_recovery_pct, 4, 1, Qt.AlignmentFlag.AlignLeft)
+        slay.addWidget(self.sf_sym_expiry,       4, 2, Qt.AlignmentFlag.AlignLeft)
+
+        slay.addWidget(self.sf_coin_check,   5, 0)
+        slay.addWidget(self.sf_coin_drop,    5, 1, Qt.AlignmentFlag.AlignLeft)
+        slay.addWidget(self.sf_max_trades,   6, 0)
+        slay.addWidget(self.sf_max_trades_n, 6, 1, Qt.AlignmentFlag.AlignLeft)
+        slay.addWidget(self.sf_daily_loss,   7, 0)
+        slay.addWidget(self.sf_daily_loss_n, 7, 1, Qt.AlignmentFlag.AlignLeft)
+        slay.addWidget(self.sf_reset_btn,    8, 0, 1, 2)
 
         grid2.addWidget(safety_grp, 1, 0)
 
@@ -6190,15 +6409,22 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
 
     def _apply_safety_config(self):
         """Read safety UI widgets into SAFETY_CFG."""
-        SAFETY_CFG["signal_persistence"]    = self.sf_persistence.isChecked()
-        SAFETY_CFG["btc_trend_check"]       = self.sf_btc_check.isChecked()
-        SAFETY_CFG["btc_drop_pct"]          = self.sf_btc_drop.value()
-        SAFETY_CFG["coin_trend_check"]      = self.sf_coin_check.isChecked()
-        SAFETY_CFG["coin_drop_pct"]         = self.sf_coin_drop.value()
-        SAFETY_CFG["max_open_trades"]       = self.sf_max_trades.isChecked()
-        SAFETY_CFG["max_open_trades_count"] = self.sf_max_trades_n.value()
-        SAFETY_CFG["daily_loss_limit"]      = self.sf_daily_loss.isChecked()
-        SAFETY_CFG["daily_loss_amount"]     = self.sf_daily_loss_n.value()
+        SAFETY_CFG["signal_persistence"]          = self.sf_persistence.isChecked()
+        SAFETY_CFG["btc_trend_check"]             = self.sf_btc_check.isChecked()
+        SAFETY_CFG["btc_drop_pct"]                = self.sf_btc_drop.value()
+        SAFETY_CFG["btc_drop_cooldown_mins"]      = self.sf_btc_cooldown_mins.value()
+        SAFETY_CFG["btc_recovery_pct"]            = self.sf_btc_recovery.value()
+        SAFETY_CFG["trend_1h_freshness"]          = self.sf_trend_freshness.isChecked()
+        SAFETY_CFG["trend_1h_stale_pct"]          = self.sf_trend_stale.value()
+        SAFETY_CFG["symbol_recovery_gate"]        = self.sf_sym_recovery.isChecked()
+        SAFETY_CFG["symbol_recovery_pct"]         = self.sf_sym_recovery_pct.value()
+        SAFETY_CFG["symbol_recovery_expiry_mins"] = self.sf_sym_expiry.value()
+        SAFETY_CFG["coin_trend_check"]            = self.sf_coin_check.isChecked()
+        SAFETY_CFG["coin_drop_pct"]               = self.sf_coin_drop.value()
+        SAFETY_CFG["max_open_trades"]             = self.sf_max_trades.isChecked()
+        SAFETY_CFG["max_open_trades_count"]       = self.sf_max_trades_n.value()
+        SAFETY_CFG["daily_loss_limit"]            = self.sf_daily_loss.isChecked()
+        SAFETY_CFG["daily_loss_amount"]           = self.sf_daily_loss_n.value()
 
     def _apply_config(self):
         global FONT_SIZE
@@ -6274,6 +6500,13 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
             self.sf_persistence.setChecked(SAFETY_CFG["signal_persistence"])
             self.sf_btc_check.setChecked(SAFETY_CFG["btc_trend_check"])
             self.sf_btc_drop.setValue(SAFETY_CFG["btc_drop_pct"])
+            self.sf_btc_cooldown_mins.setValue(SAFETY_CFG.get("btc_drop_cooldown_mins", 60))
+            self.sf_btc_recovery.setValue(SAFETY_CFG.get("btc_recovery_pct", 1.5))
+            self.sf_trend_freshness.setChecked(SAFETY_CFG.get("trend_1h_freshness", True))
+            self.sf_trend_stale.setValue(SAFETY_CFG.get("trend_1h_stale_pct", 1.5))
+            self.sf_sym_recovery.setChecked(SAFETY_CFG.get("symbol_recovery_gate", True))
+            self.sf_sym_recovery_pct.setValue(SAFETY_CFG.get("symbol_recovery_pct", 1.0))
+            self.sf_sym_expiry.setValue(SAFETY_CFG.get("symbol_recovery_expiry_mins", 30))
             self.sf_coin_check.setChecked(SAFETY_CFG["coin_trend_check"])
             self.sf_coin_drop.setValue(SAFETY_CFG["coin_drop_pct"])
             self.sf_max_trades.setChecked(SAFETY_CFG["max_open_trades"])

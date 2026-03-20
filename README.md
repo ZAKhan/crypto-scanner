@@ -1,4 +1,4 @@
-# Crypto Scalper Scanner v2.4.0
+# Crypto Scalper Scanner v2.4.2
 
 A professional PyQt6 desktop application for scanning Binance spot markets, identifying high-probability scalping opportunities, and executing live trades with automated stop-loss protection.
 
@@ -46,6 +46,9 @@ All rules individually toggleable in Config tab → TRADE SAFETY:
 |------|---------|-------------|
 | Signal persistence | On | Signal must hold 2+ consecutive scans |
 | BTC trend check | On | Skip if BTC dropping > 2% |
+| BTC drop cooldown | On | Block new LONGs for 60 min after BTC drop; lifts early on 1.5% BTC recovery |
+| 1h trend freshness | On | Override stale `trend_1h='up'` if price already fell >1.5% below 1h open |
+| Per-symbol recovery gate | On | After a safety block, require 1% bounce before re-entry (max 30 min lock) |
 | Coin trend check | On | Skip if coin down > 5% in 24h |
 | Max open trades | On | Hard limit of 3 concurrent trades |
 | Daily loss limit | On | Stop trading if losses exceed $100 |
@@ -280,7 +283,30 @@ Signal logs are created daily and files older than 7 days are deleted automatica
 
 ## Changelog
 
-### v2.4.0 (current)
+### v2.4.2 (current)
+**Safety Filter — Post-Mortem Improvements** *(based on ENJUSDT loss analysis 2026-03-19)*
+- **BTC drop cooldown** — after BTC drops >2%, block new LONGs for 60 minutes (configurable). Previously the filter reset as soon as the 24hr % recovered, allowing re-entry mid-crash. Cooldown lifts early if BTC recovers 1.5% from its drop low
+- **1h trend freshness check** — if a coin is already >1.5% below its current 1h candle open, `trend_1h='up'` is treated as stale and the LONG is blocked. Prevents entering falling-knife moves that still show an old uptrend label
+- **Per-symbol recovery gate** — after a safety block fires for any coin, that coin requires a 1% bounce from the block price before a new LONG is allowed. Max lock 30 minutes. Stops repeated entries during a sustained drop
+- All 3 rules configurable via new rows in Settings → Safety tab
+
+**Alerts Tab — Right-Click Context Menu**
+- Right-click any row in the Alerts history table to get the same context menu as the Scanner tab
+- **BUY** — opens trade dialog pre-filled with symbol, signal, and alert price
+- **Open on Binance** and **Open on TradingView** — both respect the custom browser path from Config
+- Symbol/signal/price stored in `UserRole` at alert insert time so data is always available on right-click
+
+**TradingView Browser Fix**
+- All three right-click menus (Scanner, Trades, Alerts) now route through `open_url()` respecting the configured browser path
+- Previously Scanner and Trades TV links used a hardcoded `subprocess.Popen(["xdg-open", ...])` bypassing Config entirely
+- Fixed URL bug in Alerts menu: symbol was stored without `USDT` suffix, producing `BINANCE:KAT` instead of `BINANCE:KATUSDT`
+
+### v2.4.1
+**Safety Filter — Extended BTC Drop Cooldown + Symbol Recovery Gate**
+- Extended BTC drop cooldown with configurable timer and early-lift on BTC recovery
+- Per-symbol recovery gate after safety blocks fires
+
+### v2.4.0
 **Outcome Tracking**
 - Background `OutcomeTracker` thread checks price at 30min, 1h, 4h after every alert fires
 - 7 new signal log columns: `price_30m`, `pct_30m`, `price_1h`, `pct_1h`, `price_4h`, `pct_4h`, `outcome`
