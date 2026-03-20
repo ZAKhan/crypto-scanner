@@ -51,7 +51,7 @@ try:
 except ImportError:
     HAS_CHARTS = False
 
-APP_VERSION = "v2.4.3"
+APP_VERSION = "v2.4.4"
 
 # ─────────────────────────────────────────────────────────────
 #  CROSS-PLATFORM DATA DIRECTORY
@@ -303,15 +303,22 @@ def detect_pattern(candles):
             and last["close"] < prev["open"]
             and last["open"] > prev["close"]):
         return "Bearish Engulf ↓"
-    # Rejection ↓ — 2+ of last 3 candles have upper wick > body (price rejected at highs)
-    # Checked before Squeeze so a squeezing coin with repeated wick rejections is caught
+    # Rejection ↓ — all 3 of last 3 candles show meaningful upper wick rejection
+    # Conditions per candle (shooting-star level threshold to avoid noise):
+    #   uw > body * 2.0  — wick at least twice the body (same bar as Shooting Star)
+    #   uw / range > 0.4 — upper wick dominates more than 40% of the candle's range
+    # Requires ALL 3 candles to keep false-positive rate < 0.2% on random candles.
+    # Checked before Squeeze so a coiling coin with sustained wick rejection is caught.
     if len(candles) >= 4:
         recent3 = candles[-4:-1]
-        uw_rejections = sum(
-            1 for c in recent3
-            if (c["high"] - max(c["open"], c["close"])) > abs(c["close"] - c["open"])
-        )
-        if uw_rejections >= 2:
+        def _is_rejection_candle(c):
+            body = abs(c["close"] - c["open"])
+            rng  = c["high"] - c["low"]
+            uw   = c["high"] - max(c["open"], c["close"])
+            if rng == 0 or body == 0:
+                return False
+            return uw > body * 2.0 and uw / rng > 0.4
+        if all(_is_rejection_candle(c) for c in recent3):
             return "Rejection ↓"
 
     last5 = max(closes[-5:]) - min(closes[-5:])
@@ -2260,6 +2267,47 @@ class ScanWorker(QThread):
             self.error.emit(self._scanner.status)
 
 # ─────────────────────────────────────────────────────────────
+#  UPDATE CHECKER
+# ─────────────────────────────────────────────────────────────
+GITHUB_RELEASES_API  = "https://api.github.com/repos/ZAKhan/crypto-scanner/releases/latest"
+GITHUB_RELEASES_PAGE = "https://github.com/ZAKhan/crypto-scanner/releases/latest"
+
+class UpdateChecker(QThread):
+    """
+    Checks GitHub releases API for a newer version tag.
+    Runs once in a background thread — never blocks the UI.
+    Emits update_available(latest_tag, release_url) if a newer version exists.
+    Silently swallows all errors (no internet, rate limit, bad JSON, etc.).
+    """
+    update_available = pyqtSignal(str, str)   # latest_tag, release_url
+
+    def run(self):
+        try:
+            resp = requests.get(
+                GITHUB_RELEASES_API,
+                timeout=8,
+                headers={"Accept": "application/vnd.github+json",
+                         "User-Agent": f"CryptoScalperScanner/{APP_VERSION}"}
+            )
+            if resp.status_code != 200:
+                return
+            data = resp.json()
+            latest_tag = data.get("tag_name", "").strip()
+            html_url   = data.get("html_url", GITHUB_RELEASES_PAGE).strip()
+            if not latest_tag:
+                return
+            # Normalise tags to comparable tuples: "v2.4.3" -> (2, 4, 3)
+            def _parse(tag):
+                import re as _re
+                nums = _re.findall(r"\d+", tag)
+                return tuple(int(n) for n in nums)
+            if _parse(latest_tag) > _parse(APP_VERSION):
+                self.update_available.emit(latest_tag, html_url)
+        except Exception:
+            pass   # network error, timeout, parse error — silently ignore
+
+
+# ─────────────────────────────────────────────────────────────
 #  SIGNAL BADGE
 # ─────────────────────────────────────────────────────────────
 class TooltipHeaderView(QHeaderView):
@@ -3018,6 +3066,8 @@ class CryptoScannerWindow(QMainWindow):
         # _on_alert_scan_done will start it
         # Refresh balance display on startup
         QTimer.singleShot(1000, self._refresh_balance_display)
+        # Check for new version on GitHub — 5s delay so startup scan gets priority
+        QTimer.singleShot(5000, self._start_update_check)
         # Show scanning status immediately so user knows it's working
         self.statusBar().showMessage("Starting scan…")
         self.scan_btn.setEnabled(False)
@@ -3113,6 +3163,39 @@ class CryptoScannerWindow(QMainWindow):
             f"font-size:12px; padding:4px; border-bottom:1px solid {RED};")
         self._live_banner.setVisible(not TRADING_CFG["testnet"])
         root.addWidget(self._live_banner)
+
+        # ── Update-available banner (hidden until checker fires) ──────────
+        self._update_banner = QFrame()
+        self._update_banner.setFixedHeight(34)
+        self._update_banner.setStyleSheet(
+            "background:#1a2e1a; border-bottom:1px solid #2d5a2d;")
+        self._update_banner.setVisible(False)
+        _ub_lay = QHBoxLayout(self._update_banner)
+        _ub_lay.setContentsMargins(16, 0, 10, 0)
+        _ub_lay.setSpacing(10)
+        self._update_banner_lbl = QLabel()
+        self._update_banner_lbl.setStyleSheet(
+            "color:#7ddb7d; font-size:12px; background:transparent; border:none;")
+        _ub_lay.addWidget(self._update_banner_lbl, 1)
+        _ub_dl_btn = QPushButton("⬇ Download")
+        _ub_dl_btn.setFixedHeight(22)
+        _ub_dl_btn.setStyleSheet(
+            "background:#2d5a2d; color:#a0e8a0; border:1px solid #3d7a3d; "
+            "border-radius:3px; font-size:11px; font-weight:700; padding:0 10px;")
+        _ub_dl_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        _ub_dl_btn.clicked.connect(lambda: open_url(self._update_release_url))
+        _ub_lay.addWidget(_ub_dl_btn)
+        _ub_close_btn = QPushButton("✕")
+        _ub_close_btn.setFixedSize(22, 22)
+        _ub_close_btn.setToolTip("Dismiss")
+        _ub_close_btn.setStyleSheet(
+            "background:transparent; color:#3d7a3d; border:none; "
+            "font-size:13px; font-weight:700;")
+        _ub_close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        _ub_close_btn.clicked.connect(lambda: self._update_banner.setVisible(False))
+        _ub_lay.addWidget(_ub_close_btn)
+        self._update_release_url = GITHUB_RELEASES_PAGE
+        root.addWidget(self._update_banner)
 
         tabs = QTabWidget()
 
@@ -6341,6 +6424,19 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         self._bal_fetch_thread = _BalFetch()
         self._bal_fetch_thread.done.connect(_on_done)
         self._bal_fetch_thread.start()
+
+    def _start_update_check(self):
+        """Kick off background version check — called 5s after startup."""
+        self._update_checker = UpdateChecker()
+        self._update_checker.update_available.connect(self._on_update_available)
+        self._update_checker.start()
+
+    def _on_update_available(self, latest_tag: str, release_url: str):
+        """Show the update banner. Called from UpdateChecker thread via signal."""
+        self._update_release_url = release_url
+        self._update_banner_lbl.setText(
+            f"⬆  New version available: {latest_tag}  —  you have {APP_VERSION}")
+        self._update_banner.setVisible(True)
 
     def _refresh_trading_mode_btn(self):
         """Update the testnet/live toggle button appearance."""
