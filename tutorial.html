@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Crypto Scalp Scanner v2.4.2 — User Guide</title>
+<title>Crypto Scalp Scanner v2.4.3 — User Guide</title>
 <style>
 :root {
   --bg:#0a0e1a; --card:#1a2235; --border:#1e2d47;
@@ -120,7 +120,7 @@ hr{border:none;border-top:1px solid var(--border);margin:48px 0;}
   </div>
   <p class="hero-sub">Professional Binance scanner for sub-$1 coins. Multi-indicator scoring, live trading with OCO stop-loss, WebSocket real-time prices, trade safety system, and full signal audit logging.</p>
   <div class="hero-badges">
-    <span class="badge">v2.4.2</span>
+    <span class="badge">v2.4.3</span>
     <span class="badge">Python 3.10+</span>
     <span class="badge">PyQt6</span>
     <span class="badge">Binance Spot API</span>
@@ -532,28 +532,36 @@ hr{border:none;border-top:1px solid var(--border);margin:48px 0;}
 <!-- PRE-BREAKOUT -->
 <h2 id="prebreakout">9 — PRE-BREAKOUT Signal <span class="new-badge">NEW v2.2</span></h2>
 <div class="section-tag orange">Early warning</div>
-<p>PRE-BREAKOUT fires before a coin moves — not after. It detects coins quietly coiling before a price spike by requiring all 4 conditions simultaneously:</p>
+<p>PRE-BREAKOUT fires before a coin moves — not after. It detects coins quietly coiling before a price spike by requiring all conditions simultaneously:</p>
 
 <div class="safety-grid">
   <div class="safety-item">
-    <div class="safety-title">BB Width &lt; 5%</div>
-    <div class="safety-desc">Bollinger Bands are squeezed tight — price has been ranging in a very narrow band. Like a spring compressing before release.</div>
+    <div class="safety-title">BB Width 1.5–5%</div>
+    <div class="safety-desc">Bollinger Bands squeezed tight — price ranging in a narrow band. The floor of 1.5% prevents firing when bands are too close together to be meaningful. <span class="new-badge">UPDATED v2.4.3</span></div>
   </div>
   <div class="safety-item">
     <div class="safety-title">Volume ≥ 1.5× average</div>
     <div class="safety-desc">Unusual volume building quietly. Smart money accumulating before the move.</div>
   </div>
   <div class="safety-item">
-    <div class="safety-title">RSI between 35-55</div>
+    <div class="safety-title">RSI between 35–55</div>
     <div class="safety-desc">Not overbought, recovering from oversold. Price has room to move up.</div>
   </div>
   <div class="safety-item">
     <div class="safety-title">Price in bottom 25% of BB range</div>
     <div class="safety-desc">Price sitting near the lower Bollinger Band — at support. Primed for a bounce.</div>
   </div>
+  <div class="safety-item">
+    <div class="safety-title">Not at resistance <span class="new-badge">NEW v2.4.3</span></div>
+    <div class="safety-desc">Price must be more than 1% below the 15-candle high. If price is already at the recent ceiling, the signal is blocked — entering at resistance is the wrong side of the trade.</div>
+  </div>
 </div>
 
 <div class="tip"><div class="tip-icon">💡</div><div class="tip-body"><strong>PRE-BREAKOUT appears first in both Scanner and Top Picks</strong>, above STRONG BUY. It has its own orange badge and distinct 3-tone ascending alert sound. Use it to get ahead of the move.</div></div>
+
+<h3>Rejection ↓ Pattern <span class="new-badge">NEW v2.4.3</span></h3>
+<p>A new candlestick pattern added in v2.4.3. Fires when 2 or more of the last 3 candles have an upper wick larger than their body — repeated rejection at the highs. This pattern is treated as bearish (same as Downtrend ↓) and blocks alerts when <strong>Block Downtrend pattern</strong> is enabled in Alert Settings.</p>
+<p>This directly addresses the PHAUSDT post-mortem: the scanner was firing PRE-BREAKOUT on a coin showing repeated upper wick rejection at resistance — a distribution signal, not accumulation.</p>
 
 <!-- WEBSOCKET -->
 <h2 id="websocket">10 — WebSocket Live Prices <span class="new-badge">NEW v2.2</span></h2>
@@ -746,7 +754,7 @@ hr{border:none;border-top:1px solid var(--border);margin:48px 0;}
 
 <hr>
 <div class="footer">
-  Crypto Scalp Scanner v2.4.2 &nbsp;·&nbsp; Binance Spot API + WebSocket &nbsp;·&nbsp;
+  Crypto Scalp Scanner v2.4.3 &nbsp;·&nbsp; Binance Spot API + WebSocket &nbsp;·&nbsp;
   Logs: <code>CryptoScalper/logs/</code> &nbsp;·&nbsp;
   GitHub: <code>github.com/ZAKhan/crypto-scanner</code>
 </div>

@@ -51,7 +51,7 @@ try:
 except ImportError:
     HAS_CHARTS = False
 
-APP_VERSION = "v2.4.2"
+APP_VERSION = "v2.4.3"
 
 # ─────────────────────────────────────────────────────────────
 #  CROSS-PLATFORM DATA DIRECTORY
@@ -303,6 +303,17 @@ def detect_pattern(candles):
             and last["close"] < prev["open"]
             and last["open"] > prev["close"]):
         return "Bearish Engulf ↓"
+    # Rejection ↓ — 2+ of last 3 candles have upper wick > body (price rejected at highs)
+    # Checked before Squeeze so a squeezing coin with repeated wick rejections is caught
+    if len(candles) >= 4:
+        recent3 = candles[-4:-1]
+        uw_rejections = sum(
+            1 for c in recent3
+            if (c["high"] - max(c["open"], c["close"])) > abs(c["close"] - c["open"])
+        )
+        if uw_rejections >= 2:
+            return "Rejection ↓"
+
     last5 = max(closes[-5:]) - min(closes[-5:])
     avg_r = statistics.mean([c["high"] - c["low"] for c in candles[-20:]])
     if last5 < avg_r * 0.4:
@@ -378,7 +389,7 @@ def score_signal(rsi, macd_h, price, bb_upper, bb_lower, bb_mid, pattern,
     # ── Candlestick pattern ─────────────────────────────
     # Confirming pattern = +2, contra-direction pattern = -1 penalty
     BULLISH = ["Hammer", "Bullish Engulf", "Vol Spike ↑", "Uptrend"]
-    BEARISH  = ["Shooting Star", "Bearish Engulf", "Vol Spike ↓", "Downtrend"]
+    BEARISH  = ["Shooting Star", "Bearish Engulf", "Vol Spike ↓", "Downtrend", "Rejection"]
     for p in BULLISH:
         if p in pattern:
             long_score  += 2
@@ -571,14 +582,22 @@ def analyse(symbol, raw_klines, change_24h=0.0):
 
     # ── PRE-BREAKOUT detection ──────────────────────────
     # Fires when: BB squeeze + volume building + RSI recovering + price at support
+    # Gap fixes (v2.4.3):
+    #   F1 — at_resistance: skip if price is within 1% of the 15-candle high.
+    #        Price at a ceiling is not a breakout setup — it is a sell zone.
+    #   F3 — bb_width floor: when bands are < 1.5% apart bb_pct_pos is noise;
+    #        don't fire a signal based on sub-noise position data.
     pre_breakout = False
     if signal in ("NEUTRAL", "BUY") and bbu and bbl and closes[-1] > 0:
-        bb_pct_pos = (closes[-1] - bbl) / (bbu - bbl) * 100 if (bbu - bbl) > 0 else 50
+        bb_pct_pos    = (closes[-1] - bbl) / (bbu - bbl) * 100 if (bbu - bbl) > 0 else 50
+        recent_high   = max(highs[-15:])
+        at_resistance = closes[-1] >= recent_high * 0.99   # within 1% of 15-candle high
         pre_breakout = (
-            bb_width_pct < 5.0 and          # BB squeeze — bands very tight
+            1.5 <= bb_width_pct < 5.0 and   # BB squeeze — tight but not sub-noise
             vol_ratio >= 1.5 and             # volume building (1.5x average)
             35 <= rsi <= 55 and              # RSI recovering, not overbought
-            bb_pct_pos < 25                  # price near lower band
+            bb_pct_pos < 25 and             # price near lower band
+            not at_resistance               # not entering at resistance ceiling
         )
         if pre_breakout:
             signal  = "PRE-BREAKOUT"
@@ -1433,7 +1452,7 @@ def log_scan_results(results, alert_cfg=None, safety_cfg=None, trades=None):
                     rsi  <= ALERT_CFG.get("max_rsi", 100) and
                     bb_pct_raw <= ALERT_CFG.get("max_bb_pct", 200) and
                     r.get("vol_ratio", 0) >= ALERT_CFG.get("min_vol_ratio", 0) and
-                    (not ALERT_CFG.get("block_downtrend") or "Downtrend" not in r.get("pattern", "")) and
+                    (not ALERT_CFG.get("block_downtrend") or not any(p in r.get("pattern", "") for p in ("Downtrend", "Rejection"))) and
                     (not ALERT_CFG.get("require_macd_rising") or r.get("macd_rising", False)) and
                     (not ALERT_CFG.get("require_vol_spike") or r.get("vol_spike", False))
                 )
@@ -1730,7 +1749,7 @@ class AlertEngine(QObject):
                       r.get("bb_pct", 50) <= ALERT_CFG["max_bb_pct"] and
                       r.get("adr_pct", 0) >= ALERT_CFG["min_adr_pct"] and
                       r.get("vol_ratio", 0) >= ALERT_CFG.get("min_vol_ratio", 0) and
-                      (not ALERT_CFG.get("block_downtrend") or "Downtrend" not in r.get("pattern", "")) and
+                      (not ALERT_CFG.get("block_downtrend") or not any(p in r.get("pattern", "") for p in ("Downtrend", "Rejection"))) and
                       (not ALERT_CFG.get("require_macd_rising") or r.get("macd_rising", False)) and
                       (not ALERT_CFG["require_vol_spike"] or r.get("vol_spike", False)) and
                       _spike_ok and _cooldown_ok)
@@ -4998,7 +5017,7 @@ class CryptoScannerWindow(QMainWindow):
         self.al_block_downtrend = QCheckBox("Block Downtrend pattern")
         self.al_block_downtrend.setChecked(ALERT_CFG.get("block_downtrend", True))
         self.al_block_downtrend.setStyleSheet(f"color:{WHITE};")
-        self.al_block_downtrend.setToolTip("Skip alerts when candlestick pattern shows Downtrend ↓")
+        self.al_block_downtrend.setToolTip("Skip alerts when candlestick pattern shows Downtrend ↓ or Rejection ↓")
 
         # Fix 2 — min vol ratio
         self.al_min_vol_ratio = QDoubleSpinBox()
