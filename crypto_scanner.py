@@ -51,7 +51,7 @@ try:
 except ImportError:
     HAS_CHARTS = False
 
-APP_VERSION = "v2.4.4"
+APP_VERSION = "v2.5.0"
 
 # ─────────────────────────────────────────────────────────────
 #  CROSS-PLATFORM DATA DIRECTORY
@@ -337,7 +337,8 @@ def detect_pattern(candles):
 
 def score_signal(rsi, macd_h, price, bb_upper, bb_lower, bb_mid, pattern,
                  change_24h=0.0, stoch_rsi=50.0,
-                 vol_ratio=1.0, macd_rising=False, bb_width_pct=0.0):
+                 vol_ratio=1.0, macd_rising=False, bb_width_pct=0.0,
+                 trend_1h="flat"):
     """
     Confluence scoring — quality over quantity.
     Key improvements over v2:
@@ -346,6 +347,8 @@ def score_signal(rsi, macd_h, price, bb_upper, bb_lower, bb_mid, pattern,
     - Contra-pattern penalty: bearish pattern on a long signal reduces score
     - Score margin: signal must clearly win, not just edge out by 1
     - RSI: still contributes from 45 down, but deeper = more points
+    - 1h trend alignment: trading with the higher timeframe rewarded;
+      trading against a confirmed 1h downtrend penalised (v2.4.5)
     Targets 5-12 actionable signals per 30-coin scan.
     """
     long_score  = 0
@@ -417,6 +420,17 @@ def score_signal(rsi, macd_h, price, bb_upper, bb_lower, bb_mid, pattern,
     elif change_24h > 8:   short_score += 1
     elif change_24h < -10: long_score  += 1   # oversold on day = bounce candidate
     # Note: heavy bleeding (-20%+) does NOT get extra bonus — may be in freefall
+
+    # ── 1h trend alignment (v2.4.5) ────────────────────
+    # Trading WITH the 1h trend is rewarded; against it is penalised.
+    # "up"   = price > EMA50, slope rising  -> confirms long signals
+    # "down" = price < EMA50, slope falling -> contradicts longs strongly
+    # "flat" = neutral, no adjustment
+    if trend_1h == "up":
+        long_score  += 1   # trend confirms long direction
+    elif trend_1h == "down":
+        long_score  -= 2   # penalise longs trading against downtrend
+        short_score += 1   # reward shorts aligned with downtrend
 
     # ── Clip negatives ──────────────────────────────────
     long_score  = max(0, long_score)
@@ -547,7 +561,7 @@ def calc_expected_move(candles, signal):
     return round(expected, 2)
 
 
-def analyse(symbol, raw_klines, change_24h=0.0):
+def analyse(symbol, raw_klines, change_24h=0.0, trend_1h="flat"):
     candles = [{"open": float(k[1]), "high": float(k[2]),
                 "low":  float(k[3]), "close": float(k[4]),
                 "vol":  float(k[5])} for k in raw_klines]
@@ -585,7 +599,8 @@ def analyse(symbol, raw_klines, change_24h=0.0):
 
     signal, sig_clr, long_sc, short_sc = score_signal(
         rsi, mh, closes[-1], bbu, bbl, bbm, pattern, change_24h, stoch_rsi,
-        vol_ratio=vol_ratio, macd_rising=macd_rising, bb_width_pct=bb_width_pct)
+        vol_ratio=vol_ratio, macd_rising=macd_rising, bb_width_pct=bb_width_pct,
+        trend_1h=trend_1h)
 
     # ── PRE-BREAKOUT detection ──────────────────────────
     # Fires when: BB squeeze + volume building + RSI recovering + price at support
@@ -992,9 +1007,10 @@ class Scanner:
                 self.progress = (i + 1, total)
                 try:
                     raw  = fetch_klines(sym, CFG["interval"], CFG["candle_limit"])
-                    data = analyse(sym, raw, coin["change"])
+                    t1h  = fetch_trend_1h(sym)
+                    data = analyse(sym, raw, coin["change"], trend_1h=t1h)
                     data["symbol"]     = sym
-                    data["trend_1h"]   = fetch_trend_1h(sym)
+                    data["trend_1h"]   = t1h
                     data["volume_24h"] = coin["volume"]
                     data["change_24h"] = coin["change"]
                     results.append(data)
@@ -1069,8 +1085,12 @@ ALERT_CFG = {
     "require_vol_spike": False,     # only alert if volume spike detected
     "min_adr_pct":      0.5,        # minimum avg candle range % — skip flat coins
     "block_downtrend":  True,       # Fix 1 — block alerts when pattern shows Downtrend
+    "block_1h_downtrend": True,     # v2.4.5 — block BUY alerts when 1h trend is down
     "min_vol_ratio":    0.8,        # Fix 2 — minimum volume ratio vs average
     "spike_cooldown":   True,       # Fix 3 — skip coin if spiked >15% in last 3 hours
+    "crash_cooldown":   True,       # v2.4.5 — skip BUY if single candle dropped >8% recently
+    "crash_pct":        8.0,        # v2.4.5 — single candle drop % threshold
+    "crash_cooldown_mins": 60,      # v2.4.5 — cooldown duration in minutes after crash candle
     "spike_pct":        15.0,       # Fix 3 — spike threshold %
     "require_macd_rising": False,   # Fix 4 — only alert if MACD is rising
     "coin_cooldown":       True,    # Fix 5 — per-coin alert cooldown
@@ -1218,7 +1238,8 @@ SAFETY_CFG = {
     "coin_drop_pct":            5.0,
 }
 _daily_loss_tracker      = {"date": "", "loss": 0.0}
-_spike_cooldown_tracker  = {}  # symbol -> timestamp of spike detection
+_spike_cooldown_tracker  = {}  # symbol -> timestamp of upward spike detection
+_crash_cooldown_tracker  = {}  # symbol -> timestamp of single-candle crash detection
 
 import time as _time
 _btc_drop_state = {
@@ -1461,7 +1482,13 @@ def log_scan_results(results, alert_cfg=None, safety_cfg=None, trades=None):
                     r.get("vol_ratio", 0) >= ALERT_CFG.get("min_vol_ratio", 0) and
                     (not ALERT_CFG.get("block_downtrend") or not any(p in r.get("pattern", "") for p in ("Downtrend", "Rejection"))) and
                     (not ALERT_CFG.get("require_macd_rising") or r.get("macd_rising", False)) and
-                    (not ALERT_CFG.get("require_vol_spike") or r.get("vol_spike", False))
+                    (not ALERT_CFG.get("require_vol_spike") or r.get("vol_spike", False)) and
+                    (not ALERT_CFG.get("block_1h_downtrend", True) or
+                     not ("BUY" in sig and r.get("trend_1h") == "down")) and
+                    (not ALERT_CFG.get("crash_cooldown", True) or
+                     not ("BUY" in sig and any(
+                         (c["open"] - c["close"]) / c["open"] * 100 >= ALERT_CFG.get("crash_pct", 8.0)
+                         for c in r.get("candles", [])[-3:] if c["open"] > 0)))
                 )
 
                 # Would safety have blocked it?
@@ -1726,9 +1753,15 @@ class AlertEngine(QObject):
             pot    = r.get("potential", 0)
             exp    = r.get("expected_move", 0)
 
-            # Only alert on NEW signals (wasn't a signal before, or upgraded)
+            # Only alert on NEW signals (wasn't a signal before, or upgraded),
+            # OR when conf just reached 2 (signal persistence just satisfied).
+            # Without this second condition, is_new flips to False on scan 2
+            # — the exact scan where persistence clears — so the alert never fires.
+            conf    = r.get("signal_conf", 1)
             is_new = (sig != "NEUTRAL" and
-                      (prev == "NEUTRAL" or sig_order.get(prev, 4) > level))
+                      (prev == "NEUTRAL" or
+                       sig_order.get(prev, 4) > level or
+                       conf == 2))  # just satisfied persistence — fire now
             # Fix 3 — spike cooldown check
             _now_ts = datetime.now()
             _spike_ok = True
@@ -1741,6 +1774,25 @@ class AlertEngine(QObject):
                 if r.get("change", 0) >= _spike_threshold:
                     _spike_cooldown_tracker[sym] = _now_ts
 
+            # v2.4.5 — crash cooldown: block BUY if a single candle crashed recently
+            _crash_ok = True
+            if ALERT_CFG.get("crash_cooldown", True) and "BUY" in sig:
+                _crash_mins   = ALERT_CFG.get("crash_cooldown_mins", 60)
+                _crash_thresh = ALERT_CFG.get("crash_pct", 8.0)
+                _last_crash   = _crash_cooldown_tracker.get(sym)
+                if _last_crash and (_now_ts - _last_crash).seconds < _crash_mins * 60:
+                    _crash_ok = False  # still in crash cooldown
+                # Detect crash candle — check if any of last 3 candles dropped > threshold
+                candles = r.get("candles", [])
+                if candles and len(candles) >= 2:
+                    for _c in candles[-3:]:
+                        if _c["open"] > 0:
+                            _candle_drop = (_c["open"] - _c["close"]) / _c["open"] * 100
+                            if _candle_drop >= _crash_thresh:
+                                _crash_cooldown_tracker[sym] = _now_ts
+                                _crash_ok = False
+                                break
+
             # Fix 5 — per-coin cooldown check
             _cooldown_ok = True
             if ALERT_CFG.get("coin_cooldown"):
@@ -1748,6 +1800,12 @@ class AlertEngine(QObject):
                 _last_alert = _coin_alert_tracker.get(sym)
                 if _last_alert and (_now_ts - _last_alert).seconds < _cooldown_mins * 60:
                     _cooldown_ok = False
+
+            # 1h downtrend block: skip BUY signals when higher timeframe is bearish
+            _1h_ok = True
+            if ALERT_CFG.get("block_1h_downtrend", True) and "BUY" in sig:
+                if r.get("trend_1h") == "down":
+                    _1h_ok = False
 
             passes = (level <= min_level and
                       pot >= ALERT_CFG["min_potential"] and
@@ -1759,7 +1817,7 @@ class AlertEngine(QObject):
                       (not ALERT_CFG.get("block_downtrend") or not any(p in r.get("pattern", "") for p in ("Downtrend", "Rejection"))) and
                       (not ALERT_CFG.get("require_macd_rising") or r.get("macd_rising", False)) and
                       (not ALERT_CFG["require_vol_spike"] or r.get("vol_spike", False)) and
-                      _spike_ok and _cooldown_ok)
+                      _spike_ok and _cooldown_ok and _1h_ok and _crash_ok)
 
             if is_new and passes:
                 _coin_alert_tracker[sym] = _now_ts  # record last alert time
@@ -2265,6 +2323,158 @@ class ScanWorker(QThread):
             self.finished.emit(results)
         else:
             self.error.emit(self._scanner.status)
+
+
+# ─────────────────────────────────────────────────────────────
+#  VOLUME SURGE DETECTOR
+#  Catches coins spiking BEFORE they enter the top-30 scan list.
+#  Runs every 60s independently of the main scanner.
+#  Strategy: compare each coin's current 24h quoteVolume against
+#  its value from the previous tick. A coin jumping 3×+ in one
+#  interval with price not yet up >surge_max_price_pct% is a
+#  candidate — fetch its candles and fire a SURGE alert.
+# ─────────────────────────────────────────────────────────────
+
+SURGE_CFG = {
+    "enabled":            True,
+    "interval_sec":       60,        # how often to check (matches alert engine)
+    "volume_mult":        3.0,       # vol must grow by this multiple in one tick
+    "max_price_pct":      8.0,       # skip if price already up more than this %
+    "min_price_pct":      1.0,       # skip if price barely moved (not a real surge)
+    "min_vol_usdt":       200_000,   # coin must have at least this 24h volume now
+    "candle_limit":       20,        # candles to fetch for surge candidates
+}
+
+# Per-coin volume memory: symbol -> last seen quoteVolume
+_surge_vol_memory = {}   # symbol -> float
+
+class VolumeSurgeDetector(QObject):
+    """
+    Background thread that detects volume surges on ANY coin under $1,
+    not just the top-30 scan list. Emits surge_alert(dict) when a
+    genuine surge is found.
+    """
+    surge_alert = pyqtSignal(dict)
+
+    def __init__(self):
+        super().__init__()
+        self._thread  = None
+        self._running = False
+
+    def start(self):
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._running = False
+
+    def _loop(self):
+        while self._running:
+            if SURGE_CFG["enabled"]:
+                try:
+                    self._check()
+                except Exception:
+                    pass
+            for _ in range(SURGE_CFG["interval_sec"] * 10):
+                if not self._running:
+                    return
+                time.sleep(0.1)
+
+    def _check(self):
+        """Fetch all tickers, compare volumes, fire surges."""
+        try:
+            tickers = fetch_all_tickers()
+        except Exception:
+            return
+
+        surges = []
+        for t in tickers:
+            sym = t.get("symbol", "")
+            if not sym.endswith("USDT"):
+                continue
+            try:
+                price   = float(t["lastPrice"])
+                vol_24h = float(t["quoteVolume"])
+                chg_pct = float(t["priceChangePercent"])
+            except Exception:
+                continue
+
+            # Basic gates
+            if price <= 0 or price >= CFG["max_price"]:
+                continue
+            if vol_24h < SURGE_CFG["min_vol_usdt"]:
+                continue
+
+            prev_vol = _surge_vol_memory.get(sym)
+            _surge_vol_memory[sym] = vol_24h   # always update memory
+
+            if prev_vol is None or prev_vol <= 0:
+                continue   # first time seeing this coin — no comparison yet
+
+            vol_ratio = vol_24h / prev_vol
+
+            # Volume must have grown significantly in this tick
+            if vol_ratio < SURGE_CFG["volume_mult"]:
+                continue
+
+            # Price must have moved — but not too much already
+            if chg_pct < SURGE_CFG["min_price_pct"]:
+                continue
+            if chg_pct > SURGE_CFG["max_price_pct"]:
+                continue   # already moved too far — likely too late
+
+            surges.append({
+                "symbol":    sym,
+                "price":     price,
+                "chg_pct":   chg_pct,
+                "vol_24h":   vol_24h,
+                "vol_ratio": round(vol_ratio, 1),
+            })
+
+        if not surges:
+            return
+
+        # For each surge candidate, fetch candles to confirm
+        for s in surges[:5]:   # cap at 5 per tick to avoid API hammering
+            try:
+                sym   = s["symbol"]
+                raw   = fetch_klines(sym, "5m", SURGE_CFG["candle_limit"])
+                if not raw or len(raw) < 3:
+                    continue
+                candles   = [{"open": float(k[1]), "high": float(k[2]),
+                              "low":  float(k[3]), "close": float(k[4]),
+                              "vol":  float(k[5])} for k in raw]
+                vols      = [c["vol"] for c in candles]
+                avg_vol   = statistics.mean(vols[:-1]) if len(vols) > 1 else vols[0]
+                last_vol  = vols[-1]
+                vol_ratio_5m = round(last_vol / avg_vol, 1) if avg_vol > 0 else 0
+
+                rsi = calc_rsi([c["close"] for c in candles])
+
+                alert = {
+                    "time":       datetime.now().strftime("%H:%M:%S"),
+                    "symbol":     sym.replace("USDT", ""),
+                    "signal":     "VOLUME SURGE",
+                    "price":      s["price"],
+                    "chg_pct":    round(s["chg_pct"], 2),
+                    "vol_24h_x":  s["vol_ratio"],    # how much 24h vol grew
+                    "vol_5m_x":   vol_ratio_5m,      # last 5m candle vs avg
+                    "rsi":        rsi,
+                    # Fields expected by notification/log systems
+                    "rsi":        rsi,
+                    "exp":        s["chg_pct"],
+                    "pot":        min(int(s["vol_ratio"] * 10), 100),
+                    "vol":        vol_ratio_5m,
+                    "pattern":    f"24h vol {s['vol_ratio']}x  |  price +{s['chg_pct']:.1f}%",
+                    "surge":      True,              # flag for UI to colour differently
+                }
+                self.surge_alert.emit(alert)
+                time.sleep(0.15)   # small pause between kline fetches
+            except Exception:
+                continue
 
 # ─────────────────────────────────────────────────────────────
 #  UPDATE CHECKER
@@ -3041,6 +3251,10 @@ class CryptoScannerWindow(QMainWindow):
         self._alert_engine.scan_done.connect(self._on_alert_scan_done)
         self._alert_engine.scan_started.connect(self._on_alert_scan_started)
 
+        # Volume surge detector — watches ALL coins, not just top-30
+        self._surge_detector = VolumeSurgeDetector()
+        self._surge_detector.surge_alert.connect(self._on_surge_alert)
+
         # WebSocket price feed
         if _WS_AVAILABLE:
             self._ws_feed = BinanceWebSocketPrices()
@@ -3056,6 +3270,7 @@ class CryptoScannerWindow(QMainWindow):
         # Start trade price monitor immediately — runs always, not just on Trades tab
         self._trades_refresh_timer.start()
         self._alert_engine.start()
+        self._surge_detector.start()
         _outcome_tracker.start()
         # Subscribe open trade symbols immediately so prices start flowing
         if self._ws_feed:
@@ -5102,6 +5317,16 @@ class CryptoScannerWindow(QMainWindow):
         self.al_block_downtrend.setStyleSheet(f"color:{WHITE};")
         self.al_block_downtrend.setToolTip("Skip alerts when candlestick pattern shows Downtrend ↓ or Rejection ↓")
 
+        # v2.4.5 — block BUY alerts when 1h trend is bearish
+        self.al_block_1h_downtrend = QCheckBox("Block BUY when 1H trend is bearish  ↓")
+        self.al_block_1h_downtrend.setChecked(ALERT_CFG.get("block_1h_downtrend", True))
+        self.al_block_1h_downtrend.setStyleSheet(f"color:{WHITE};")
+        self.al_block_1h_downtrend.setToolTip(
+            "Skip BUY and STRONG BUY alerts when the 1h EMA50 trend is bearish.\n"
+            "Prevents scalping long into a confirmed higher-timeframe downtrend.\n"
+            "The 1H column in the scanner shows ↓ when this would block an alert."
+        )
+
         # Fix 2 — min vol ratio
         self.al_min_vol_ratio = QDoubleSpinBox()
         self.al_min_vol_ratio.setFixedWidth(160)
@@ -5132,6 +5357,31 @@ class CryptoScannerWindow(QMainWindow):
             "Prevents chasing dump-after-pump signals like ROBO"
         )
 
+
+        # v2.4.5 — crash cooldown
+        self.al_crash_cooldown = QCheckBox("Crash candle cooldown  >")
+        self.al_crash_cooldown.setChecked(ALERT_CFG.get("crash_cooldown", True))
+        self.al_crash_cooldown.setStyleSheet(f"color:{WHITE};")
+        self.al_crash_cooldown_pct = QDoubleSpinBox()
+        self.al_crash_cooldown_pct.setFixedWidth(100)
+        self.al_crash_cooldown_pct.setRange(3, 30)
+        self.al_crash_cooldown_pct.setDecimals(0)
+        self.al_crash_cooldown_pct.setValue(ALERT_CFG.get("crash_pct", 8.0))
+        self.al_crash_cooldown_pct.setSuffix("% drop → block")
+        self.al_crash_cooldown_pct.setEnabled(ALERT_CFG.get("crash_cooldown", True))
+        self.al_crash_cooldown.toggled.connect(self.al_crash_cooldown_pct.setEnabled)
+        self.al_crash_cooldown_mins = QSpinBox()
+        self.al_crash_cooldown_mins.setFixedWidth(80)
+        self.al_crash_cooldown_mins.setRange(10, 240)
+        self.al_crash_cooldown_mins.setValue(ALERT_CFG.get("crash_cooldown_mins", 60))
+        self.al_crash_cooldown_mins.setSuffix(" min")
+        self.al_crash_cooldown_mins.setEnabled(ALERT_CFG.get("crash_cooldown", True))
+        self.al_crash_cooldown.toggled.connect(self.al_crash_cooldown_mins.setEnabled)
+        self.al_crash_cooldown.setToolTip(
+            "If any of the last 3 candles dropped more than this %,\n"
+            "block BUY alerts on that coin for the cooldown period.\n"
+            "Catches post-dump bounce alerts like PHA 11:08."
+        )
         # Fix 4 — MACD rising
         self.al_require_macd = QCheckBox("Require MACD rising")
 
@@ -5189,21 +5439,30 @@ class CryptoScannerWindow(QMainWindow):
         row_offset = len(rows) + 1
         aglay.addWidget(self.al_vol_spike,          row_offset,     0, 1, 2)
         aglay.addWidget(self.al_block_downtrend,    row_offset + 1, 0, 1, 2)
-        aglay.addWidget(self.al_require_macd,       row_offset + 2, 0, 1, 2)
+        aglay.addWidget(self.al_block_1h_downtrend, row_offset + 2, 0, 1, 2)
+        aglay.addWidget(self.al_require_macd,       row_offset + 3, 0, 1, 2)
         # Spike cooldown row
         spike_row = QHBoxLayout()
         spike_row.addWidget(self.al_spike_cooldown)
         spike_row.addWidget(self.al_spike_cooldown_pct)
         spike_row.addStretch()
         spike_w = QWidget(); spike_w.setLayout(spike_row)
-        aglay.addWidget(spike_w,                    row_offset + 3, 0, 1, 2)
+        aglay.addWidget(spike_w,                    row_offset + 4, 0, 1, 2)
         # Per-coin cooldown row
         cooldown_row = QHBoxLayout()
         cooldown_row.addWidget(self.al_coin_cooldown)
         cooldown_row.addWidget(self.al_coin_cooldown_mins)
         cooldown_row.addStretch()
         cooldown_w = QWidget(); cooldown_w.setLayout(cooldown_row)
-        aglay.addWidget(cooldown_w,                 row_offset + 4, 0, 1, 2)
+        aglay.addWidget(cooldown_w,                 row_offset + 5, 0, 1, 2)
+        # Crash cooldown row
+        crash_row = QHBoxLayout()
+        crash_row.addWidget(self.al_crash_cooldown)
+        crash_row.addWidget(self.al_crash_cooldown_pct)
+        crash_row.addWidget(self.al_crash_cooldown_mins)
+        crash_row.addStretch()
+        crash_w = QWidget(); crash_w.setLayout(crash_row)
+        aglay.addWidget(crash_w,                    row_offset + 6, 0, 1, 2)
 
         # Top row: auto-scan left, notification channels right
         top_row = QHBoxLayout()
@@ -5401,9 +5660,13 @@ class CryptoScannerWindow(QMainWindow):
         ALERT_CFG["require_vol_spike"]    = self.al_vol_spike.isChecked()
         ALERT_CFG["min_adr_pct"]          = self.al_min_adr.value()
         ALERT_CFG["block_downtrend"]      = self.al_block_downtrend.isChecked()
+        ALERT_CFG["block_1h_downtrend"]   = self.al_block_1h_downtrend.isChecked()
         ALERT_CFG["min_vol_ratio"]        = self.al_min_vol_ratio.value()
         ALERT_CFG["spike_cooldown"]       = self.al_spike_cooldown.isChecked()
         ALERT_CFG["spike_pct"]            = self.al_spike_cooldown_pct.value()
+        ALERT_CFG["crash_cooldown"]       = self.al_crash_cooldown.isChecked()
+        ALERT_CFG["crash_pct"]            = self.al_crash_cooldown_pct.value()
+        ALERT_CFG["crash_cooldown_mins"]  = self.al_crash_cooldown_mins.value()
         ALERT_CFG["require_macd_rising"]  = self.al_require_macd.isChecked()
         ALERT_CFG["coin_cooldown"]        = self.al_coin_cooldown.isChecked()
         ALERT_CFG["coin_cooldown_mins"]   = self.al_coin_cooldown_mins.value()
@@ -5518,17 +5781,28 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         """Insert a single alert row into the history table."""
         if not hasattr(self, 'alert_log_table'):
             return
-        sig = alert.get("signal", "")
-        col = GREEN if "BUY" in sig else (RED if "SELL" in sig else "#ff9900")
+        sig    = alert.get("signal", "")
+        is_surge = alert.get("surge", False)
+        col    = GREEN if "BUY" in sig else (RED if "SELL" in sig else "#ff9900")
+        if is_surge:
+            col = "#ff9500"   # amber for surge alerts
 
         try:
-            detail_text = (
-                f"RSI {float(alert.get('rsi',0)):.0f}  ·  "
-                f"Exp {float(alert.get('exp',0)):.1f}%  ·  "
-                f"Pot {alert.get('pot',0)}%  ·  "
-                f"Vol {float(alert.get('vol',0)):.1f}x  ·  "
-                f"{alert.get('pattern','')}"
-            )
+            if is_surge:
+                detail_text = (
+                    f"24h vol {alert.get('vol_24h_x',0)}x  ·  "
+                    f"5m vol {float(alert.get('vol_5m_x',0)):.1f}x  ·  "
+                    f"Price +{float(alert.get('chg_pct',0)):.1f}%  ·  "
+                    f"RSI {float(alert.get('rsi',0)):.0f}"
+                )
+            else:
+                detail_text = (
+                    f"RSI {float(alert.get('rsi',0)):.0f}  ·  "
+                    f"Exp {float(alert.get('exp',0)):.1f}%  ·  "
+                    f"Pot {alert.get('pot',0)}%  ·  "
+                    f"Vol {float(alert.get('vol',0)):.1f}x  ·  "
+                    f"{alert.get('pattern','')}"
+                )
         except Exception:
             detail_text = str(alert.get("pattern", ""))
         try:
@@ -5563,6 +5837,14 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         tbl.setItem(0, 4, cell(price_text, WHITE,
                                align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter))
 
+        # Apply amber background AFTER all cells are set
+        if is_surge:
+            surge_bg = QColor("#2a1f00")
+            for _c in range(tbl.columnCount()):
+                _item = tbl.item(0, _c)
+                if _item:
+                    _item.setBackground(surge_bg)
+
         # Limit to 20 rows
         while tbl.rowCount() > 20:
             tbl.removeRow(tbl.rowCount() - 1)
@@ -5588,6 +5870,23 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
 
         self._add_alert_row(alert, flash=True)
         self._update_history_tab_badge()
+
+    def _on_surge_alert(self, alert):
+        """Called when VolumeSurgeDetector fires — same pipeline as normal alert
+        but with surge=True flag so the row gets amber background."""
+        self._alert_log.append(alert)
+        if len(self._alert_log) > 20:
+            self._alert_log = self._alert_log[-20:]
+        self._add_alert_row(alert, flash=True)
+        self._update_history_tab_badge()
+        # Play sound and desktop notify
+        if ALERT_CFG["sound"]:
+            self._alert_engine._play_sound("STRONG BUY")
+        if ALERT_CFG["desktop"]:
+            sym = alert["symbol"]
+            msg = (f"VOLUME SURGE: {sym}  ${alert['price']:.5f}\n"
+                   f"24h vol {alert['vol_24h_x']}x  |  price +{alert['chg_pct']:.1f}%  |  RSI {alert['rsi']:.0f}")
+            self._alert_engine._desktop_notify("VOLUME SURGE", sym, msg)
 
     def _on_ws_connected(self):
         """WebSocket connected — update status bar indicator."""
@@ -6749,9 +7048,13 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
                 self.al_vol_spike.setChecked(ALERT_CFG.get("require_vol_spike", False))
                 self.al_min_adr.setValue(float(ALERT_CFG.get("min_adr_pct", 0.5)))
                 self.al_block_downtrend.setChecked(ALERT_CFG.get("block_downtrend", True))
+                self.al_block_1h_downtrend.setChecked(ALERT_CFG.get("block_1h_downtrend", True))
                 self.al_min_vol_ratio.setValue(float(ALERT_CFG.get("min_vol_ratio", 0.8)))
                 self.al_spike_cooldown.setChecked(ALERT_CFG.get("spike_cooldown", True))
                 self.al_spike_cooldown_pct.setValue(float(ALERT_CFG.get("spike_pct", 15.0)))
+                self.al_crash_cooldown.setChecked(ALERT_CFG.get("crash_cooldown", True))
+                self.al_crash_cooldown_pct.setValue(float(ALERT_CFG.get("crash_pct", 8.0)))
+                self.al_crash_cooldown_mins.setValue(int(ALERT_CFG.get("crash_cooldown_mins", 60)))
                 self.al_require_macd.setChecked(ALERT_CFG.get("require_macd_rising", False))
                 self.al_coin_cooldown.setChecked(ALERT_CFG.get("coin_cooldown", True))
                 self.al_coin_cooldown_mins.setValue(int(ALERT_CFG.get("coin_cooldown_mins", 30)))
@@ -6868,6 +7171,7 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
 
     def closeEvent(self, event):
         self._alert_engine.stop()
+        self._surge_detector.stop()
         self._trades_refresh_timer.stop()
         self._dot_blink_timer.stop()
         _outcome_tracker.stop()
