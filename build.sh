@@ -69,6 +69,7 @@ pyinstaller \
     --clean \
     --strip \
     $ICON_ARG \
+    --collect-all cs \
     --hidden-import sys \
     --hidden-import os \
     --hidden-import struct \

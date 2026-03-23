@@ -16,8 +16,8 @@ KEEP=(
     "app_icon.png" "build.sh" "push_release.sh" "cleanup.sh"
     "requirements.txt" "README.md" "tutorial.html"
     "crypto_scanner_guide.odt" "crypto_scanner.desktop"
-    "crypto_scanner.py" "CHANGELOG_v2.4.0.html"
-    ".git" ".github" ".gitignore"
+    "crypto_scanner.py" "cs" "CHANGELOG_v2_6_0.html"
+    ".git" ".github" ".gitignore" "LICENSE" "crypto_scanner_guide.pdf"
 )
 
 echo -e "${YELLOW}Will move to backup:${RESET}"

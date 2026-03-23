@@ -6,7 +6,7 @@
 
 **Professional-grade Binance spot scanner, signal engine, and live trading terminal — all in one desktop app.**
 
-[![Version](https://img.shields.io/badge/version-v2.4.3-00e87a?style=for-the-badge&labelColor=0c1520)](https://github.com/ZAKhan/crypto-scanner/releases/latest)
+[![Version](https://img.shields.io/badge/version-v2.6.0-00e87a?style=for-the-badge&labelColor=0c1520)](https://github.com/ZAKhan/crypto-scanner/releases/latest)
 [![Python](https://img.shields.io/badge/Python-3.10+-3776ab?style=for-the-badge&logo=python&logoColor=white&labelColor=0c1520)](https://python.org)
 [![PyQt6](https://img.shields.io/badge/PyQt6-6.4+-41cd52?style=for-the-badge&labelColor=0c1520)](https://pypi.org/project/PyQt6/)
 [![License](https://img.shields.io/badge/License-MIT-ffd000?style=for-the-badge&labelColor=0c1520)](LICENSE)
@@ -120,15 +120,25 @@ Create free testnet keys at [testnet.binance.vision](https://testnet.binance.vis
 
 ## Architecture
 
-| Component | Role |
+`crypto_scanner.py` is the entry point. All logic lives in the `cs/` package:
+
+| Module | Role |
 |---|---|
-| `crypto_scanner.py` | Single-file application (~7,800 lines) |
-| `ScanWorker` | QThread — manual scan button |
-| `AlertEngine` | Background auto-scan loop |
-| `BinanceWebSocketPrices` | Real-time price feed, per-symbol streams |
-| `BinanceTrader` | All order operations (BUY, OCO, SELL) |
-| `OutcomeTracker` | Background WIN/LOSS/FLAT recorder |
-| `check_trade_safety()` | 8-rule safety gate before every trade |
+| `cs/config.py` | Version, paths, `CFG` / scan settings |
+| `cs/api.py` | Binance REST helpers, `TRADING_CFG` |
+| `cs/indicators.py` | RSI · MACD · Bollinger · StochRSI · patterns · `analyse()` |
+| `cs/trader.py` | `BinanceTrader` — all order operations (BUY, OCO, SELL) |
+| `cs/scanner.py` | `Scanner` / `ScanWorker` — manual scan thread |
+| `cs/alerts.py` | `AlertEngine` · `OutcomeTracker` — auto-scan and WIN/LOSS tracking |
+| `cs/safety.py` | `check_trade_safety()` — 8-rule safety gate |
+| `cs/sounds.py` | Pure-Python WAV alert sounds |
+| `cs/logger.py` | Signal audit CSV log |
+| `cs/surge.py` | `VolumeSurgeDetector` |
+| `cs/updater.py` | GitHub version checker |
+| `cs/stylesheet.py` | Qt6 dark theme stylesheet |
+| `cs/widgets.py` | Custom Qt widgets (sparklines, badges, charts, detail panel) |
+| `cs/websocket_feed.py` | `BinanceWebSocketPrices` — real-time price feed |
+| `cs/main_window.py` | `CryptoScannerWindow` — main UI |
 
 ---
 

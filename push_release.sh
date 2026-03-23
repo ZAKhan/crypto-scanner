@@ -27,20 +27,16 @@ step "Pre-flight checks"
 
 REQUIRED_FILES=(
     crypto_scanner.py
-    app_icon.png
+    cs/config.py
     build.sh
-    crypto_scanner.desktop
     requirements.txt
     README.md
     push_release.sh
 )
 
 OPTIONAL_FILES=(
-    tutorial.html
-    crypto_scanner_guide.odt
-    crypto_scanner_guide.pdf
     LICENSE
-    CHANGELOG_v2.4.0.html
+    CHANGELOG_v2_6_0.html
 )
 
 ALL_OK=true
@@ -79,24 +75,23 @@ ok "All required files present"
 # ── Files always included ────────────────────────────────────
 CORE_FILES=(
     crypto_scanner.py
-    app_icon.png
     build.sh
-    crypto_scanner.desktop
     push_release.sh
+    cleanup.sh
     requirements.txt
 )
 
 # ── Docs — staged only if modified ──────────────────────────
 DOC_FILES=(
     README.md
-    tutorial.html
-    crypto_scanner_guide.odt
+    LICENSE
+    CHANGELOG_v2_6_0.html
 )
 
 # ── Ask for version ──────────────────────────────────────────
 step "Version"
 
-CURRENT_VER=$(grep -oP '(?<=APP_VERSION = ").*(?=")' crypto_scanner.py 2>/dev/null || echo "unknown")
+CURRENT_VER=$(grep -oP '(?<=APP_VERSION = ").*(?=")' cs/config.py 2>/dev/null || echo "unknown")
 echo -e "  Current APP_VERSION in code: ${YELLOW}$CURRENT_VER${RESET}"
 echo ""
 read -p "Enter release version (e.g. 2.2.0): " VERSION
@@ -111,7 +106,7 @@ if [[ "$CURRENT_VER" != "v$VERSION" && "$CURRENT_VER" != "$VERSION" ]]; then
     echo ""
     read -p "Update APP_VERSION to v$VERSION in crypto_scanner.py? (y/n): " UPDATE_VER
     if [[ "$UPDATE_VER" == "y" ]]; then
-        sed -i "s/APP_VERSION = \".*\"/APP_VERSION = \"v$VERSION\"/" crypto_scanner.py
+        sed -i "s/APP_VERSION = \".*\"/APP_VERSION = \"v$VERSION\"/" cs/config.py
         ok "APP_VERSION updated to v$VERSION"
     fi
 else
@@ -135,6 +130,14 @@ for f in "${CORE_FILES[@]}"; do
         echo -e "  ${YELLOW}–${RESET} $f  (skipped — not found)"
     fi
 done
+
+# Stage the entire cs/ package
+if [[ -d "cs" ]]; then
+    git add cs/
+    echo -e "  ${GREEN}+${RESET} cs/  (package)"
+else
+    echo -e "  ${RED}✗${RESET} cs/  ← MISSING — package not found"
+fi
 
 echo ""
 echo -e "${BOLD}Docs (only if modified):${RESET}"
