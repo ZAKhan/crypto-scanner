@@ -2906,7 +2906,7 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         self.cfg_candles = QSpinBox()
         self.cfg_candles.setRange(20, 200); self.cfg_candles.setValue(CFG["candle_limit"]); self.cfg_candles.setFixedWidth(160)
 
-        self.cfg_new_listing = QCheckBox("New listing filter")
+        self.cfg_new_listing = QCheckBox("Enable")
         self.cfg_new_listing.setChecked(CFG.get("new_listing_filter", False))
         self.cfg_new_listing.setStyleSheet(f"color:{WHITE};")
         self.cfg_new_listing.setToolTip(
@@ -2916,14 +2916,12 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         self.cfg_new_listing_min = QSpinBox()
         self.cfg_new_listing_min.setRange(1, 30)
         self.cfg_new_listing_min.setValue(CFG.get("new_listing_min_days", 2))
-        self.cfg_new_listing_min.setSuffix(" days min")
         self.cfg_new_listing_min.setFixedWidth(160)
         self.cfg_new_listing_min.setToolTip("Minimum days since listing (skip coins listed today / yesterday)")
 
         self.cfg_new_listing_max = QSpinBox()
         self.cfg_new_listing_max.setRange(2, 90)
         self.cfg_new_listing_max.setValue(CFG.get("new_listing_max_days", 10))
-        self.cfg_new_listing_max.setSuffix(" days max")
         self.cfg_new_listing_max.setFixedWidth(160)
         self.cfg_new_listing_max.setToolTip("Maximum days since listing (skip older coins)")
 
@@ -2934,9 +2932,9 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
             ("Top N coins",       self.cfg_top_n),
             ("Top Picks to show", self.cfg_picks_n),
             ("Candles to fetch",  self.cfg_candles),
-            ("",                  self.cfg_new_listing),
-            ("Listed min",        self.cfg_new_listing_min),
-            ("Listed max",        self.cfg_new_listing_max),
+            ("New Listing Filter", self.cfg_new_listing),
+            ("Listed min days",   self.cfg_new_listing_min),
+            ("Listed max days",   self.cfg_new_listing_max),
         ]
         for i, (lbl, widget) in enumerate(rows):
             l = QLabel(lbl); l.setStyleSheet(f"color:{DIM};")
