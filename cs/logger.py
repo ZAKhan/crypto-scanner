@@ -17,7 +17,8 @@ ALERT_CFG = {
     "wa_number":        "",         # recipient: country code + number, e.g. 923001234567
     "picoclaw_queue":   os.path.expanduser("~/.picoclaw/workspace/crypto_alerts.json"),
     "min_potential":    40,         # only alert if Pot% >= this
-    "min_exp_move":     3.0,        # only alert if Exp% >= this
+    "min_exp_move":     2.0,        # only alert if Exp% >= this (lowered from 3.0)
+    "squeeze_exempt_bb_width": 3.0, # exempt exp/vol filters when BB squeezed this tight
     "max_rsi":          70,         # only alert if RSI <= this
     "max_bb_pct":       80,         # only alert if BB% <= this (0=oversold, 100=overbought)
     "require_vol_spike": False,     # only alert if volume spike detected
@@ -116,13 +117,17 @@ def log_scan_results(results, alert_cfg=None, safety_cfg=None, trades=None):
 
                 # Would this have fired an alert?
                 level = sig_order.get(sig, 5)
+                _bb_w  = r.get("bb_width_pct", 99)
+                _sqex  = ("BUY" in sig and
+                          _bb_w < ALERT_CFG.get("squeeze_exempt_bb_width", 3.0) and
+                          r.get("trend_1h") in ("up", "flat"))
                 alert_fired = (
                     level <= min_level and
                     pot  >= ALERT_CFG.get("min_potential", 0) and
-                    exp  >= ALERT_CFG.get("min_exp_move", 0) and
+                    (exp >= ALERT_CFG.get("min_exp_move", 0) or _sqex) and
                     rsi  <= ALERT_CFG.get("max_rsi", 100) and
                     bb_pct_raw <= ALERT_CFG.get("max_bb_pct", 200) and
-                    r.get("vol_ratio", 0) >= ALERT_CFG.get("min_vol_ratio", 0) and
+                    (r.get("vol_ratio", 0) >= ALERT_CFG.get("min_vol_ratio", 0) or _sqex) and
                     (not ALERT_CFG.get("block_downtrend") or not any(p in r.get("pattern", "") for p in ("Downtrend", "Rejection"))) and
                     (not ALERT_CFG.get("require_macd_rising") or r.get("macd_rising", False)) and
                     (not ALERT_CFG.get("require_vol_spike") or r.get("vol_spike", False)) and

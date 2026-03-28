@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Crypto Scalper Scanner — v2.7.0 Changelog</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&family=Syne:wght@400;600;700;800&display=swap');
+
+:root {
+  --bg:     #060a10;
+  --card:   #0c1520;
+  --card2:  #0f1c2e;
+  --border: #162338;
+  --accent: #00d4ff;
+  --green:  #00e87a;
+  --orange: #ff9500;
+  --red:    #ff3355;
+  --yellow: #ffd000;
+  --dim:    #3a4f6a;
+  --muted:  #6b85a0;
+  --text:   #b8cfe8;
+  --white:  #e4f0ff;
+  --mono:   'IBM Plex Mono', monospace;
+  --sans:   'Syne', sans-serif;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.65;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0,0,0,0.08) 2px,
+    rgba(0,0,0,0.08) 4px
+  );
+  pointer-events: none;
+  z-index: 100;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  top: -200px; left: 50%;
+  transform: translateX(-50%);
+  width: 800px; height: 400px;
+  background: radial-gradient(ellipse, rgba(0,212,255,0.06) 0%, transparent 70%);
+  pointer-events: none;
+}
+
+.wrap { max-width: 860px; margin: 0 auto; padding: 60px 24px 100px; position: relative; z-index: 1; }
+
+/* ── HEADER ── */
+.header { margin-bottom: 64px; }
+.ver-line {
+  display: flex; align-items: center; gap: 16px;
+  margin-bottom: 12px;
+}
+.ver-pill {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  padding: 4px 14px;
+  border-radius: 20px;
+  background: rgba(0,232,122,0.08);
+  border: 1px solid rgba(0,232,122,0.25);
+  color: var(--green);
+  animation: pulse 3s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(0,232,122,0); }
+  50%       { box-shadow: 0 0 12px 2px rgba(0,232,122,0.15); }
+}
+.date-pill {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--dim);
+  letter-spacing: 1px;
+}
+h1 {
+  font-family: var(--sans);
+  font-size: clamp(28px, 5vw, 44px);
+  font-weight: 800;
+  color: var(--white);
+  line-height: 1.1;
+  letter-spacing: -1px;
+}
+h1 span { color: var(--accent); }
+.tagline {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 13px;
+  max-width: 600px;
+}
+
+/* ── SUMMARY STRIP ── */
+.summary {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  margin-bottom: 56px;
+}
+.sum-cell {
+  background: var(--card);
+  padding: 18px 16px;
+  text-align: center;
+}
+.sum-num {
+  font-family: var(--mono);
+  font-size: 22px;
+  font-weight: 700;
+  margin-bottom: 3px;
+}
+.sum-lbl { font-size: 10px; color: var(--muted); letter-spacing: 1px; text-transform: uppercase; }
+.sum-cell:nth-child(1) .sum-num { color: var(--accent); }
+.sum-cell:nth-child(2) .sum-num { color: var(--green); }
+.sum-cell:nth-child(3) .sum-num { color: var(--orange); }
+.sum-cell:nth-child(4) .sum-num { color: var(--yellow); }
+
+/* ── SECTION ── */
+.section { margin-bottom: 48px; }
+.section-title {
+  display: flex; align-items: center; gap: 12px;
+  margin-bottom: 20px;
+}
+.section-icon {
+  width: 34px; height: 34px;
+  border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 16px; flex-shrink: 0;
+}
+.icon-blue   { background: rgba(0,212,255,0.1);  border: 1px solid rgba(0,212,255,0.2); }
+.icon-green  { background: rgba(0,232,122,0.1);  border: 1px solid rgba(0,232,122,0.2); }
+.icon-orange { background: rgba(255,149,0,0.1);  border: 1px solid rgba(255,149,0,0.2); }
+.icon-yellow { background: rgba(255,208,0,0.1);  border: 1px solid rgba(255,208,0,0.2); }
+
+.section-name {
+  font-family: var(--sans);
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--white);
+}
+.section-sub { font-size: 11px; color: var(--dim); font-family: var(--mono); }
+
+/* ── CHANGE CARDS ── */
+.changes { display: flex; flex-direction: column; gap: 10px; }
+.change {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  transition: border-color 0.2s, background 0.2s;
+  animation: fadeUp 0.4s ease both;
+}
+.change:hover {
+  border-color: rgba(0,212,255,0.2);
+  background: var(--card2);
+}
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.change-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-top: 6px;
+}
+.dot-blue   { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+.dot-green  { background: var(--green);  box-shadow: 0 0 6px var(--green); }
+.dot-orange { background: var(--orange); box-shadow: 0 0 6px var(--orange); }
+.dot-yellow { background: var(--yellow); box-shadow: 0 0 6px var(--yellow); }
+
+.change-body { flex: 1; }
+.change-title {
+  font-weight: 700;
+  color: var(--white);
+  font-size: 13px;
+  margin-bottom: 3px;
+}
+.change-desc { font-size: 12px; color: var(--muted); line-height: 1.5; }
+.change-desc code {
+  font-family: var(--mono);
+  font-size: 11px;
+  background: rgba(0,212,255,0.06);
+  border: 1px solid rgba(0,212,255,0.12);
+  color: var(--accent);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+.tag {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  padding: 2px 7px;
+  border-radius: 3px;
+  margin-left: 8px;
+  vertical-align: middle;
+  text-transform: uppercase;
+}
+.tag-new      { background: rgba(255,208,0,0.1);  color: var(--yellow); border: 1px solid rgba(255,208,0,0.2); }
+.tag-improved { background: rgba(0,232,122,0.1);  color: var(--green);  border: 1px solid rgba(0,232,122,0.2); }
+.tag-logic    { background: rgba(255,149,0,0.1);  color: var(--orange); border: 1px solid rgba(255,149,0,0.2); }
+
+/* ── SCORE TABLE ── */
+.score-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 12px;
+  margin-top: 16px;
+}
+.score-table th {
+  text-align: left;
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.score-table td {
+  padding: 9px 12px;
+  border-bottom: 1px solid rgba(22,35,56,0.6);
+  color: var(--text);
+  vertical-align: top;
+}
+.score-table tr:hover td { background: rgba(0,212,255,0.03); }
+.score-table td:first-child { color: var(--accent); white-space: nowrap; }
+.score-table td:nth-child(2) { color: var(--green); font-weight: 700; white-space: nowrap; }
+.neg { color: var(--red) !important; }
+
+/* ── FOOTER ── */
+.footer {
+  text-align: center;
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 1px;
+  padding-top: 32px;
+  border-top: 1px solid var(--border);
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<!-- HEADER -->
+<div class="header">
+  <div class="ver-line">
+    <div class="ver-pill">● v2.7.0</div>
+    <div class="date-pill">MARCH 28, 2026</div>
+  </div>
+  <h1>Crypto Scalper <span>Scanner</span><br>Release Notes</h1>
+  <p class="tagline">Market Structure Gate — six-component bearish structure analysis blocks BUY entries into dead-cats, lower-high downtrends, and post-dump bounces before they fire an alert.</p>
+</div>
+
+<!-- SUMMARY -->
+<div class="summary">
+  <div class="sum-cell">
+    <div class="sum-num">1</div>
+    <div class="sum-lbl">New Function</div>
+  </div>
+  <div class="sum-cell">
+    <div class="sum-num">6</div>
+    <div class="sum-lbl">Structure Checks</div>
+  </div>
+  <div class="sum-cell">
+    <div class="sum-num">3</div>
+    <div class="sum-lbl">Files Changed</div>
+  </div>
+  <div class="sum-cell">
+    <div class="sum-num">0</div>
+    <div class="sum-lbl">Extra API Calls</div>
+  </div>
+</div>
+
+<!-- SECTION 1: market_context() -->
+<div class="section">
+  <div class="section-title">
+    <div class="section-icon icon-orange">🧱</div>
+    <div>
+      <div class="section-name">market_context() — cs/indicators.py</div>
+      <div class="section-sub">New function — 6-component structure analysis on last 25+ candles</div>
+    </div>
+  </div>
+  <div class="changes">
+    <div class="change">
+      <div class="change-dot dot-orange"></div>
+      <div class="change-body">
+        <div class="change-title">EMA-50 slope as trend proxy<span class="tag tag-logic">Logic</span></div>
+        <div class="change-desc">Computes the percentage change in EMA-50 over the last 20 bars. Slope &gt; +0.3% → trend "up" (+1). Slope &lt; −0.3% → trend "down" (−1). Neutral slopes leave score unchanged. Requires at least 50 candles of data for the EMA to be meaningful.</div>
+      </div>
+    </div>
+    <div class="change">
+      <div class="change-dot dot-orange"></div>
+      <div class="change-body">
+        <div class="change-title">Lower highs — 3 consecutive swing highs declining<span class="tag tag-logic">Logic</span></div>
+        <div class="change-desc">Identifies swing highs as bars whose <code>high</code> exceeds both neighbours. If the last 3 swing highs form a descending sequence, <code>lower_highs = True</code> and score −2. This is the strongest bearish structural signal — classic lower-high downtrend.</div>
+      </div>
+    </div>
+    <div class="change">
+      <div class="change-dot dot-orange"></div>
+      <div class="change-body">
+        <div class="change-title">Lower lows — 2 consecutive swing lows declining<span class="tag tag-logic">Logic</span></div>
+        <div class="change-desc">Same approach applied to swing lows (bars whose <code>low</code> undercuts both neighbours). Two declining lows → <code>lower_lows = True</code>, score −1. Combined with lower highs, this fully confirms a bear structure.</div>
+      </div>
+    </div>
+    <div class="change">
+      <div class="change-dot dot-red"></div>
+      <div class="change-body">
+        <div class="change-title">Dump detector — big red candle with heavy volume in last 10 bars<span class="tag tag-logic">Logic</span></div>
+        <div class="change-desc">Scans the last 10 candles for a red bar with body &gt; 0.5% of open price AND volume &gt; 2× the candle-set average. Records the highest <code>dump_vol_ratio</code> found. Score −1. The dump's volume multiple is used in the next check.</div>
+      </div>
+    </div>
+    <div class="change">
+      <div class="change-dot dot-yellow"></div>
+      <div class="change-body">
+        <div class="change-title">Bounce quality — last 3 bars vs dump candle volume<span class="tag tag-logic">Logic</span></div>
+        <div class="change-desc">Only runs if a dump was detected. Compares the average volume of the last 3 candles against the dump candle's volume. If bounce volume ≥ 60% of dump volume → real demand, score +1. Below that threshold → dead-cat bounce risk, score −1, <code>bounce_vol_weak = True</code>.</div>
+      </div>
+    </div>
+    <div class="change">
+      <div class="change-dot dot-green"></div>
+      <div class="change-body">
+        <div class="change-title">Volume character — last 5 bars buy vs sell pressure<span class="tag tag-logic">Logic</span></div>
+        <div class="change-desc">Splits the last 5 bars into buy volume (green candles) and sell volume (red candles). Buy ratio &gt; 65% → "buying" (+1). Buy ratio &lt; 35% → "selling" (−1). Shown in <code>block_reason</code> as <em>sell pressure</em>.</div>
+      </div>
+    </div>
+  </div>
+
+  <table class="score-table">
+    <thead>
+      <tr><th>Condition</th><th>Score Impact</th><th>block_reason token</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>EMA-50 slope &gt; +0.3%</td><td>+1</td><td>—</td></tr>
+      <tr><td>EMA-50 slope &lt; −0.3%</td><td class="neg">−1</td><td>downtrend</td></tr>
+      <tr><td>3 lower swing highs</td><td class="neg">−2</td><td>lower-highs</td></tr>
+      <tr><td>2 lower swing lows</td><td class="neg">−1</td><td>lower-lows</td></tr>
+      <tr><td>Dump candle in last 10 bars</td><td class="neg">−1</td><td>—</td></tr>
+      <tr><td>Strong bounce after dump (≥ 60% vol)</td><td>+1</td><td>—</td></tr>
+      <tr><td>Weak bounce after dump (&lt; 60% vol)</td><td class="neg">−1</td><td>dead-cat risk</td></tr>
+      <tr><td>Last 5 bars: buy ratio &gt; 65%</td><td>+1</td><td>—</td></tr>
+      <tr><td>Last 5 bars: buy ratio &lt; 35%</td><td class="neg">−1</td><td>sell pressure</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- SECTION 2: Scanner gate -->
+<div class="section">
+  <div class="section-title">
+    <div class="section-icon icon-blue">🔒</div>
+    <div>
+      <div class="section-name">Signal Gate — cs/scanner.py</div>
+      <div class="section-sub">Downgrades BUY / STRONG BUY / PRE-BREAKOUT when structure_score ≤ −2</div>
+    </div>
+  </div>
+  <div class="changes">
+    <div class="change">
+      <div class="change-dot dot-blue"></div>
+      <div class="change-body">
+        <div class="change-title">market_context() called after every positive signal<span class="tag tag-new">New</span></div>
+        <div class="change-desc">In <code>Scanner._scan()</code>, immediately after <code>analyse()</code> returns a BUY, STRONG BUY, or PRE-BREAKOUT signal, <code>market_context(data["candles"])</code> is called on the already-fetched candle list — zero extra API calls. If <code>structure_score &lt;= −2</code>, signal is overwritten to NEUTRAL and <code>ctx_blocked = True</code>. Otherwise <code>ctx_blocked = False</code> and the score is attached as <code>ctx_score</code>. The <code>ctx_reason</code> string is set in both cases.</div>
+      </div>
+    </div>
+    <div class="change">
+      <div class="change-dot dot-blue"></div>
+      <div class="change-body">
+        <div class="change-title">Threshold: score ≤ −2, not −1<span class="tag tag-logic">Logic</span></div>
+        <div class="change-desc">A single bearish condition (e.g. EMA slope slightly negative) scores −1 and is not blocked — the signal still fires. The gate requires two or more concurrent bearish conditions before it acts. This avoids false negatives on coins that are just consolidating.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- SECTION 3: UI tooltip -->
+<div class="section">
+  <div class="section-title">
+    <div class="section-icon icon-green">💬</div>
+    <div>
+      <div class="section-name">Signal Tooltip — cs/main_window.py</div>
+      <div class="section-sub">Hover the Signal column to see why a signal was or wasn't blocked</div>
+    </div>
+  </div>
+  <div class="changes">
+    <div class="change">
+      <div class="change-dot dot-green"></div>
+      <div class="change-body">
+        <div class="change-title">ctx_reason shown as tooltip on the Signal cell<span class="tag tag-new">New</span></div>
+        <div class="change-desc">When a result has a non-empty <code>ctx_reason</code>, the signal cell in the Scanner table now shows a tooltip. Blocked signals display <em>"Blocked: lower-highs | dead-cat risk"</em>. Signals that passed show <em>"Context: downtrend"</em> so you can see the structural note even when the gate didn't fire. No new column — the information lives in the hover.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- SECTION 4: unchanged -->
+<div class="section">
+  <div class="section-title">
+    <div class="section-icon icon-yellow">✓</div>
+    <div>
+      <div class="section-name">Everything Else Unchanged</div>
+      <div class="section-sub">All existing signals, alerts, trades, and settings unaffected</div>
+    </div>
+  </div>
+  <div class="changes">
+    <div class="change">
+      <div class="change-dot dot-yellow"></div>
+      <div class="change-body">
+        <div class="change-title">SELL / STRONG SELL signals bypass the gate entirely<span class="tag tag-logic">Logic</span></div>
+        <div class="change-desc">The market structure gate only runs on BUY-direction signals. SELL signals are not affected — bearish structure is expected context for a short signal, not a reason to block it.</div>
+      </div>
+    </div>
+    <div class="change">
+      <div class="change-dot dot-yellow"></div>
+      <div class="change-body">
+        <div class="change-title">Settings, signal log, trades, and alert engine unchanged</div>
+        <div class="change-desc">No config keys added. No CSV columns added. No alert engine changes. Settings files from v2.6.x load without migration. The gate runs silently inside the scan thread and writes only <code>ctx_blocked</code>, <code>ctx_reason</code>, and <code>ctx_score</code> keys onto the result dict.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="footer">
+  CRYPTO SCALPER SCANNER &nbsp;·&nbsp; v2.7.0 &nbsp;·&nbsp; MARCH 28, 2026 &nbsp;·&nbsp; github.com/ZAKhan/crypto-scanner
+</div>
+
+</div>
+</body>
+</html>

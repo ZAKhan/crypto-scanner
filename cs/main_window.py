@@ -3984,6 +3984,11 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
             if row_bg: sig_item.setBackground(QBrush(row_bg))
             f = sig_item.font(); f.setBold("STRONG" in sig); sig_item.setFont(f)
             sig_item.setData(Qt.ItemDataRole.UserRole, sig_tier)
+            ctx_reason = r.get("ctx_reason", "")
+            ctx_blocked = r.get("ctx_blocked", False)
+            if ctx_reason:
+                prefix = "Blocked: " if ctx_blocked else "Context: "
+                sig_item.setToolTip(prefix + ctx_reason)
             self.table.setItem(row, 9, sig_item)
 
             pot_c = GREEN if pot >= 70 else YELLOW if pot >= 40 else RED

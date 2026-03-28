@@ -6,7 +6,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from cs.config import CFG
 from cs.api import fetch_all_tickers, fetch_klines, fetch_trend_1h
-from cs.indicators import analyse
+from cs.indicators import analyse, market_context
 
 
 class Scanner:
@@ -56,6 +56,17 @@ class Scanner:
                     raw  = fetch_klines(sym, CFG["interval"], CFG["candle_limit"])
                     t1h  = fetch_trend_1h(sym)
                     data = analyse(sym, raw, coin["change"], trend_1h=t1h)
+                    if "BUY" in data["signal"] or data["signal"] == "PRE-BREAKOUT":
+                        ctx = market_context(data["candles"])
+                        if ctx["structure_score"] <= -2:
+                            data["signal"]      = "NEUTRAL"
+                            data["sig_clr"]     = "yellow"
+                            data["ctx_blocked"] = True
+                            data["ctx_reason"]  = ctx["block_reason"]
+                        else:
+                            data["ctx_blocked"] = False
+                            data["ctx_reason"]  = ctx["block_reason"]
+                            data["ctx_score"]   = ctx["structure_score"]
                     data["symbol"]     = sym
                     data["trend_1h"]   = t1h
                     data["volume_24h"] = coin["volume"]

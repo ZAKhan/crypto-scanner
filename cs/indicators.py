@@ -389,3 +389,107 @@ def analyse(symbol, raw_klines, change_24h=0.0, trend_1h="flat"):
     result["potential"]     = profit_potential(result)
     result["expected_move"] = calc_expected_move(candles, signal)
     return result
+
+
+def market_context(candles: list[dict]) -> dict:
+    """
+    Analyses the broader price structure of the last 25+ candles.
+    Returns a context dict used to gate signals — blocking entries
+    into dead-cats, lower-high downtrends, and post-dump bounces.
+
+    Keys returned:
+      trend          : "up" | "down" | "neutral"
+      lower_highs    : bool   — 3 consecutive swing highs declining
+      lower_lows     : bool   — 2 consecutive swing lows declining
+      dump_nearby    : bool   — big red candle (body >0.5%, vol >2x avg) in last 10 bars
+      dump_vol_ratio : float  — volume multiple of the dump candle vs average
+      bounce_vol_weak: bool   — bounce vol < 60% of the dump candle vol
+      vol_trend      : "buying" | "selling" | "neutral" — last 5 bars
+      structure_score: int    — composite -3 to +3; negative = bearish structure
+      block_reason   : str    — human-readable explanation if blocked
+    """
+    import statistics as _st
+
+    ctx = {
+        "trend": "neutral", "lower_highs": False, "lower_lows": False,
+        "dump_nearby": False, "dump_vol_ratio": 0.0,
+        "bounce_vol_weak": True, "vol_trend": "neutral",
+        "structure_score": 0, "block_reason": "",
+    }
+    if len(candles) < 25:
+        return ctx
+
+    closes = [c["close"] for c in candles]
+
+    # 1. EMA-50 slope as trend proxy
+    ema_vals = ema(closes, 50)
+    if len(ema_vals) >= 20:
+        slope = (ema_vals[-1] - ema_vals[-20]) / ema_vals[-20] * 100
+        if slope > 0.3:
+            ctx["trend"] = "up";   ctx["structure_score"] += 1
+        elif slope < -0.3:
+            ctx["trend"] = "down"; ctx["structure_score"] -= 1
+
+    # 2. Lower highs — last 3 swing highs declining
+    swing_highs = [
+        candles[i]["high"] for i in range(2, len(candles) - 1)
+        if candles[i]["high"] > candles[i-1]["high"]
+        and candles[i]["high"] > candles[i+1]["high"]
+    ]
+    if len(swing_highs) >= 3 and swing_highs[-1] < swing_highs[-2] < swing_highs[-3]:
+        ctx["lower_highs"] = True
+        ctx["structure_score"] -= 2
+
+    # 3. Lower lows
+    swing_lows = [
+        candles[i]["low"] for i in range(2, len(candles) - 1)
+        if candles[i]["low"] < candles[i-1]["low"]
+        and candles[i]["low"] < candles[i+1]["low"]
+    ]
+    if len(swing_lows) >= 2 and swing_lows[-1] < swing_lows[-2]:
+        ctx["lower_lows"] = True
+        ctx["structure_score"] -= 1
+
+    # 4. Dump detector — big red candle with heavy volume in last 10 bars
+    vols    = [c["vol"] for c in candles]
+    vol_avg = _st.mean(vols) if vols else 1
+    for c in candles[-10:]:
+        is_red    = c["close"] < c["open"]
+        body_pct  = abs(c["close"] - c["open"]) / c["open"] * 100
+        vol_ratio = c["vol"] / vol_avg if vol_avg > 0 else 1
+        if is_red and body_pct > 0.5 and vol_ratio > 2.0:
+            ctx["dump_nearby"]    = True
+            ctx["dump_vol_ratio"] = max(ctx["dump_vol_ratio"], vol_ratio)
+            ctx["structure_score"] -= 1
+            break
+
+    # 5. Bounce quality — compare last 3 candle avg vol vs dump candle
+    if ctx["dump_nearby"]:
+        bounce_ratio = _st.mean(vols[-3:]) / vol_avg if vol_avg > 0 else 1
+        if bounce_ratio >= ctx["dump_vol_ratio"] * 0.6:
+            ctx["bounce_vol_weak"] = False
+            ctx["structure_score"] += 1
+        else:
+            ctx["structure_score"] -= 1
+
+    # 6. Volume character — last 5 bars buy vs sell pressure
+    last5    = candles[-5:]
+    buy_vol  = sum(c["vol"] for c in last5 if c["close"] >= c["open"])
+    sell_vol = sum(c["vol"] for c in last5 if c["close"] <  c["open"])
+    total5   = buy_vol + sell_vol
+    if total5 > 0:
+        bp = buy_vol / total5
+        if bp > 0.65:
+            ctx["vol_trend"] = "buying";  ctx["structure_score"] += 1
+        elif bp < 0.35:
+            ctx["vol_trend"] = "selling"; ctx["structure_score"] -= 1
+
+    # Build block reason string
+    reasons = []
+    if ctx["lower_highs"]:                            reasons.append("lower-highs")
+    if ctx["dump_nearby"] and ctx["bounce_vol_weak"]: reasons.append("dead-cat risk")
+    if ctx["trend"] == "down":                        reasons.append("downtrend")
+    if ctx["lower_lows"]:                             reasons.append("lower-lows")
+    if ctx["vol_trend"] == "selling":                 reasons.append("sell pressure")
+    ctx["block_reason"] = " | ".join(reasons)
+    return ctx

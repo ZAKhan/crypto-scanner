@@ -286,13 +286,36 @@ class AlertEngine(QObject):
                 if r.get("trend_1h") == "down":
                     _1h_ok = False
 
+            # Squeeze exemption (v2.6.1):
+            # When BB is tightly squeezed (<3% width) on a STRONG BUY or PRE-BREAKOUT,
+            # the expected-move formula underestimates the real move because ATR, BB width
+            # and momentum are all suppressed by the coiling. KAT Mar 23 is the proof case:
+            # exp_move was 2.5-2.9% for 60+ minutes of STRONG BUY before a +13% spike.
+            # In a squeeze, low exp_move IS the setup — don't punish it.
+            # Same logic applies to vol_ratio: pre-spike accumulation has thin volume.
+            _bb_width = r.get("bb_width_pct", 99)
+            _squeeze_exemption = (
+                "BUY" in sig and
+                _bb_width < ALERT_CFG.get("squeeze_exempt_bb_width", 3.0) and
+                r.get("trend_1h") in ("up", "flat")
+            )
+
+            _exp_ok = (
+                exp >= ALERT_CFG["min_exp_move"] or
+                _squeeze_exemption
+            )
+            _vol_ok = (
+                r.get("vol_ratio", 0) >= ALERT_CFG.get("min_vol_ratio", 0) or
+                _squeeze_exemption
+            )
+
             passes = (level <= min_level and
                       pot >= ALERT_CFG["min_potential"] and
-                      exp >= ALERT_CFG["min_exp_move"] and
+                      _exp_ok and
                       r.get("rsi", 50) <= ALERT_CFG["max_rsi"] and
                       r.get("bb_pct", 50) <= ALERT_CFG["max_bb_pct"] and
                       r.get("adr_pct", 0) >= ALERT_CFG["min_adr_pct"] and
-                      r.get("vol_ratio", 0) >= ALERT_CFG.get("min_vol_ratio", 0) and
+                      _vol_ok and
                       (not ALERT_CFG.get("block_downtrend") or not any(p in r.get("pattern", "") for p in ("Downtrend", "Rejection"))) and
                       (not ALERT_CFG.get("require_macd_rising") or r.get("macd_rising", False)) and
                       (not ALERT_CFG["require_vol_spike"] or r.get("vol_spike", False)) and

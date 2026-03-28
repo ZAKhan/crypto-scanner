@@ -37,6 +37,7 @@ REQUIRED_FILES=(
 OPTIONAL_FILES=(
     LICENSE
     CHANGELOG_v2_6_0.html
+    CHANGELOG_v2_7_0.html
 )
 
 ALL_OK=true
@@ -86,6 +87,8 @@ DOC_FILES=(
     README.md
     LICENSE
     CHANGELOG_v2_6_0.html
+    CHANGELOG_v2_7_0.html
+    tutorial.html
 )
 
 # ── Ask for version ──────────────────────────────────────────

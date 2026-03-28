@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Crypto Scalp Scanner v2.4.3 — User Guide</title>
+<title>Crypto Scalp Scanner v2.7.0 — User Guide</title>
 <style>
 :root {
   --bg:#0a0e1a; --card:#1a2235; --border:#1e2d47;
@@ -120,7 +120,7 @@ hr{border:none;border-top:1px solid var(--border);margin:48px 0;}
   </div>
   <p class="hero-sub">Professional Binance scanner for sub-$1 coins. Multi-indicator scoring, live trading with OCO stop-loss, WebSocket real-time prices, trade safety system, and full signal audit logging.</p>
   <div class="hero-badges">
-    <span class="badge">v2.4.3</span>
+    <span class="badge">v2.7.0</span>
     <span class="badge">Python 3.10+</span>
     <span class="badge">PyQt6</span>
     <span class="badge">Binance Spot API</span>
@@ -563,8 +563,47 @@ hr{border:none;border-top:1px solid var(--border);margin:48px 0;}
 <p>A new candlestick pattern added in v2.4.3. Fires when 2 or more of the last 3 candles have an upper wick larger than their body — repeated rejection at the highs. This pattern is treated as bearish (same as Downtrend ↓) and blocks alerts when <strong>Block Downtrend pattern</strong> is enabled in Alert Settings.</p>
 <p>This directly addresses the PHAUSDT post-mortem: the scanner was firing PRE-BREAKOUT on a coin showing repeated upper wick rejection at resistance — a distribution signal, not accumulation.</p>
 
+<!-- MARKET CONTEXT GATE -->
+<h2 id="marketcontext">10 — Market Structure Gate <span class="new-badge">NEW v2.7.0</span></h2>
+<div class="section-tag orange">Dead-cat &amp; downtrend filter</div>
+<p>Before a BUY, STRONG BUY, or PRE-BREAKOUT signal fires an alert, the <strong>Market Structure Gate</strong> analyses the last 25+ candles for bearish structural conditions. If the composite structure score is &leq;&nbsp;&minus;2, the signal is silently downgraded to NEUTRAL — no alert, no noise.</p>
+
+<div class="safety-grid">
+  <div class="safety-item">
+    <div class="safety-title">EMA-50 Slope (trend)</div>
+    <div class="safety-desc">If the 50-period EMA has declined more than 0.3% over the last 20 bars, the trend is flagged as <strong>down</strong> (−1 to score). A rising slope adds +1.</div>
+  </div>
+  <div class="safety-item">
+    <div class="safety-title">Lower Highs</div>
+    <div class="safety-desc">Detects 3 consecutive swing highs each lower than the last — a classic lower-high downtrend structure. Subtracts 2 from score. Shown in tooltip as <em>lower-highs</em>.</div>
+  </div>
+  <div class="safety-item">
+    <div class="safety-title">Lower Lows</div>
+    <div class="safety-desc">Two consecutive swing lows each lower than the previous. Subtracts 1 from score. Shown in tooltip as <em>lower-lows</em>.</div>
+  </div>
+  <div class="safety-item">
+    <div class="safety-title">Dump Detector</div>
+    <div class="safety-desc">Looks for a big red candle in the last 10 bars with body &gt; 0.5% and volume &gt; 2× average. If found, subtracts 1 and records the volume multiple.</div>
+  </div>
+  <div class="safety-item">
+    <div class="safety-title">Bounce Quality</div>
+    <div class="safety-desc">After a dump candle, checks if the last 3 candles' average volume is at least 60% of the dump candle's volume. Weak bounce = −1, strong bounce = +1. Weak bounces shown as <em>dead-cat risk</em>.</div>
+  </div>
+  <div class="safety-item">
+    <div class="safety-title">Volume Character (last 5 bars)</div>
+    <div class="safety-desc">If &gt;65% of recent volume is on green candles = buying pressure (+1). If &lt;35% = selling pressure (−1, shown as <em>sell pressure</em>).</div>
+  </div>
+</div>
+
+<div class="info">
+  <strong>Structure Score:</strong> ranges from −3 to +3. Score &leq; −2 blocks the signal. Hover over any signal cell in the Scanner table to see the <strong>block reason</strong> — e.g. <code>lower-highs | dead-cat risk</code> or <code>Context: downtrend | sell pressure</code>.<br><br>
+  A score of −1 or 0 still allows the signal through but the reason is visible in the tooltip for your own judgement.
+</div>
+
+<div class="tip"><div class="tip-icon">💡</div><div class="tip-body"><strong>This gate runs entirely on candles already fetched</strong> — no extra API calls. It adds zero latency to scans.</div></div>
+
 <!-- WEBSOCKET -->
-<h2 id="websocket">10 — WebSocket Live Prices <span class="new-badge">NEW v2.2</span></h2>
+<h2 id="websocket">11 — WebSocket Live Prices <span class="new-badge">NEW v2.2</span></h2>
 <div class="section-tag">Real-time feed</div>
 <p>After the first scan completes, the app connects to Binance WebSocket and receives price updates in real-time — no polling, no delays.</p>
 
@@ -754,7 +793,7 @@ hr{border:none;border-top:1px solid var(--border);margin:48px 0;}
 
 <hr>
 <div class="footer">
-  Crypto Scalp Scanner v2.4.3 &nbsp;·&nbsp; Binance Spot API + WebSocket &nbsp;·&nbsp;
+  Crypto Scalp Scanner v2.7.0 &nbsp;·&nbsp; Binance Spot API + WebSocket &nbsp;·&nbsp;
   Logs: <code>CryptoScalper/logs/</code> &nbsp;·&nbsp;
   GitHub: <code>github.com/ZAKhan/crypto-scanner</code>
 </div>

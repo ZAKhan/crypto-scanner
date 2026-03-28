@@ -1,6 +1,6 @@
 import os
 
-APP_VERSION = "v2.6.0"
+APP_VERSION = "v2.7.0"
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  CROSS-PLATFORM DATA DIRECTORY
