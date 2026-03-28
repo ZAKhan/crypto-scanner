@@ -5,7 +5,7 @@ from datetime import datetime
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from cs.config import CFG
-from cs.api import fetch_all_tickers, fetch_klines, fetch_trend_1h
+from cs.api import fetch_all_tickers, fetch_klines, fetch_trend_1h, fetch_listing_age_days
 from cs.indicators import analyse, market_context
 
 
@@ -53,6 +53,10 @@ class Scanner:
                 self.status   = f"Analysing {sym} ({i+1}/{total})..."
                 self.progress = (i + 1, total)
                 try:
+                    if CFG.get("new_listing_filter"):
+                        age = fetch_listing_age_days(sym)
+                        if age is None or not (CFG["new_listing_min_days"] <= age <= CFG["new_listing_max_days"]):
+                            continue
                     raw  = fetch_klines(sym, CFG["interval"], CFG["candle_limit"])
                     t1h  = fetch_trend_1h(sym)
                     data = analyse(sym, raw, coin["change"], trend_1h=t1h)

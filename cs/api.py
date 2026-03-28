@@ -1,3 +1,4 @@
+import time
 import requests
 
 from cs.config import CFG
@@ -14,6 +15,28 @@ def fetch_all_tickers():
 def fetch_klines(symbol, interval, limit):
     return api_get("/api/v3/klines",
                    {"symbol": symbol, "interval": interval, "limit": limit})
+
+def fetch_listing_age_days(symbol):
+    """
+    Returns how many days ago the symbol first traded on Binance.
+    Fetches the very first daily candle (startTime = Jan 1 2017) with limit=1.
+    Returns None on error.
+    """
+    try:
+        raw = api_get("/api/v3/klines", {
+            "symbol":    symbol,
+            "interval":  "1d",
+            "limit":     1,
+            "startTime": 1483228800000,   # Jan 1 2017 00:00 UTC
+        })
+        if not raw:
+            return None
+        first_open_ms = raw[0][0]
+        age_days = (time.time() * 1000 - first_open_ms) / 86_400_000
+        return round(age_days, 1)
+    except Exception:
+        return None
+
 
 def fetch_trend_1h(symbol):
     """

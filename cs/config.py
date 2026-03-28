@@ -1,6 +1,6 @@
 import os
 
-APP_VERSION = "v2.7.0"
+APP_VERSION = "v2.8.0"
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  CROSS-PLATFORM DATA DIRECTORY
@@ -36,4 +36,8 @@ CFG = {
     "tp_pct":             5.0,   # Take Profit %
     "tp2_pct":           10.0,   # TP2 (extended target) %
     "min_expected_move":  2.0,   # Filter: only show coins expected to move >2%
+    # ── New Listing Filter ────────────────────────────────
+    "new_listing_filter":   False,  # only scan recently listed coins
+    "new_listing_min_days": 2,      # listed at least this many days ago
+    "new_listing_max_days": 10,     # listed at most this many days ago
 }

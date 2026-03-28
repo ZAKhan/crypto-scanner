@@ -2906,6 +2906,27 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         self.cfg_candles = QSpinBox()
         self.cfg_candles.setRange(20, 200); self.cfg_candles.setValue(CFG["candle_limit"]); self.cfg_candles.setFixedWidth(160)
 
+        self.cfg_new_listing = QCheckBox("New listing filter")
+        self.cfg_new_listing.setChecked(CFG.get("new_listing_filter", False))
+        self.cfg_new_listing.setStyleSheet(f"color:{WHITE};")
+        self.cfg_new_listing.setToolTip(
+            "Only scan coins listed on Binance within the day range below.\n"
+            "Adds one lightweight API call per coin to check listing date.")
+
+        self.cfg_new_listing_min = QSpinBox()
+        self.cfg_new_listing_min.setRange(1, 30)
+        self.cfg_new_listing_min.setValue(CFG.get("new_listing_min_days", 2))
+        self.cfg_new_listing_min.setSuffix(" days min")
+        self.cfg_new_listing_min.setFixedWidth(160)
+        self.cfg_new_listing_min.setToolTip("Minimum days since listing (skip coins listed today / yesterday)")
+
+        self.cfg_new_listing_max = QSpinBox()
+        self.cfg_new_listing_max.setRange(2, 90)
+        self.cfg_new_listing_max.setValue(CFG.get("new_listing_max_days", 10))
+        self.cfg_new_listing_max.setSuffix(" days max")
+        self.cfg_new_listing_max.setFixedWidth(160)
+        self.cfg_new_listing_max.setToolTip("Maximum days since listing (skip older coins)")
+
         rows = [
             ("Max Price ($)",     self.cfg_max_price),
             ("Min Volume (USDT)", self.cfg_min_vol),
@@ -2913,6 +2934,9 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
             ("Top N coins",       self.cfg_top_n),
             ("Top Picks to show", self.cfg_picks_n),
             ("Candles to fetch",  self.cfg_candles),
+            ("",                  self.cfg_new_listing),
+            ("Listed min",        self.cfg_new_listing_min),
+            ("Listed max",        self.cfg_new_listing_max),
         ]
         for i, (lbl, widget) in enumerate(rows):
             l = QLabel(lbl); l.setStyleSheet(f"color:{DIM};")
@@ -3456,12 +3480,15 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
 
     def _apply_config(self):
         global FONT_SIZE
-        CFG["max_price"]       = self.cfg_max_price.value()
-        CFG["min_volume_usdt"] = self.cfg_min_vol.value()
-        CFG["interval"]        = self.cfg_interval.currentText()
-        CFG["top_n"]           = self.cfg_top_n.value()
-        CFG["picks_n"]         = self.cfg_picks_n.value()
-        CFG["candle_limit"]    = self.cfg_candles.value()
+        CFG["max_price"]            = self.cfg_max_price.value()
+        CFG["min_volume_usdt"]      = self.cfg_min_vol.value()
+        CFG["interval"]             = self.cfg_interval.currentText()
+        CFG["top_n"]                = self.cfg_top_n.value()
+        CFG["picks_n"]              = self.cfg_picks_n.value()
+        CFG["candle_limit"]         = self.cfg_candles.value()
+        CFG["new_listing_filter"]   = self.cfg_new_listing.isChecked()
+        CFG["new_listing_min_days"] = self.cfg_new_listing_min.value()
+        CFG["new_listing_max_days"] = self.cfg_new_listing_max.value()
         CFG["sl_pct"]          = self.cfg_sl.value()
         CFG["tp_pct"]          = self.cfg_tp.value()
         CFG["tp2_pct"]         = self.cfg_tp2.value()
@@ -3593,6 +3620,15 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         _load("maxPrice", self.cfg_max_price, float, "max_price")
         _load("minVol",   self.cfg_min_vol,   float, "min_volume_usdt")
         _load("candles",  self.cfg_candles,   int,   "candle_limit")
+        _load("newListingMinDays", self.cfg_new_listing_min, int,  "new_listing_min_days")
+        _load("newListingMaxDays", self.cfg_new_listing_max, int,  "new_listing_max_days")
+        try:
+            v = s.value("newListingFilter")
+            if v is not None:
+                self.cfg_new_listing.setChecked(str(v).lower() in ("true", "1"))
+                CFG["new_listing_filter"] = self.cfg_new_listing.isChecked()
+        except Exception:
+            pass
         _load("slPct",    self.cfg_sl,        float, "sl_pct")
         _load("tpPct",    self.cfg_tp,        float, "tp_pct")
         _load("tp2Pct",   self.cfg_tp2,       float, "tp2_pct")
@@ -3688,6 +3724,9 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
             s.setValue("minVol",   self.cfg_min_vol.value())
             s.setValue("interval", self.cfg_interval.currentText())
             s.setValue("candles",  self.cfg_candles.value())
+            s.setValue("newListingFilter",   self.cfg_new_listing.isChecked())
+            s.setValue("newListingMinDays",  self.cfg_new_listing_min.value())
+            s.setValue("newListingMaxDays",  self.cfg_new_listing_max.value())
             s.setValue("slPct",    self.cfg_sl.value())
             s.setValue("tpPct",    self.cfg_tp.value())
             s.setValue("tp2Pct",   self.cfg_tp2.value())

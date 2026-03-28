@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Crypto Scalp Scanner v2.7.0 — User Guide</title>
+<title>Crypto Scalp Scanner v2.8.0 — User Guide</title>
 <style>
 :root {
   --bg:#0a0e1a; --card:#1a2235; --border:#1e2d47;
@@ -120,7 +120,7 @@ hr{border:none;border-top:1px solid var(--border);margin:48px 0;}
   </div>
   <p class="hero-sub">Professional Binance scanner for sub-$1 coins. Multi-indicator scoring, live trading with OCO stop-loss, WebSocket real-time prices, trade safety system, and full signal audit logging.</p>
   <div class="hero-badges">
-    <span class="badge">v2.7.0</span>
+    <span class="badge">v2.8.0</span>
     <span class="badge">Python 3.10+</span>
     <span class="badge">PyQt6</span>
     <span class="badge">Binance Spot API</span>
@@ -563,8 +563,35 @@ hr{border:none;border-top:1px solid var(--border);margin:48px 0;}
 <p>A new candlestick pattern added in v2.4.3. Fires when 2 or more of the last 3 candles have an upper wick larger than their body — repeated rejection at the highs. This pattern is treated as bearish (same as Downtrend ↓) and blocks alerts when <strong>Block Downtrend pattern</strong> is enabled in Alert Settings.</p>
 <p>This directly addresses the PHAUSDT post-mortem: the scanner was firing PRE-BREAKOUT on a coin showing repeated upper wick rejection at resistance — a distribution signal, not accumulation.</p>
 
+<!-- NEW LISTING FILTER -->
+<h2 id="newlisting">10 — New Listing Filter <span class="new-badge">NEW v2.8.0</span></h2>
+<div class="section-tag orange">Recently listed coins only</div>
+<p>When enabled, the scanner skips all coins that were listed outside your chosen day range. Only coins that first traded on Binance between <strong>min days</strong> and <strong>max days</strong> ago pass through to analysis.</p>
+
+<div class="safety-grid">
+  <div class="safety-item">
+    <div class="safety-title">New listing filter (checkbox)</div>
+    <div class="safety-desc">Master switch. Off by default — existing scan behaviour is unchanged until you enable it. Found in <strong>Config → Scan Filters</strong>.</div>
+  </div>
+  <div class="safety-item">
+    <div class="safety-title">Listed min (default: 2 days)</div>
+    <div class="safety-desc">Skips coins listed within the last 2 days. Day-one and day-two listings are excluded — they have no reliable volume baseline and are prone to pump-and-dump manipulation.</div>
+  </div>
+  <div class="safety-item">
+    <div class="safety-title">Listed max (default: 10 days)</div>
+    <div class="safety-desc">Skips coins older than this. Set to 90 days maximum if you want a wider new-listing window. The sweet spot is 2–10 days — enough price history for indicators to be meaningful, still in the early hype cycle.</div>
+  </div>
+</div>
+
+<div class="info">
+  <strong>How listing age is detected:</strong> one lightweight REST call per coin to <code>/api/v3/klines</code> (interval=1d, limit=1, startTime=Jan 2017). The open timestamp of the first daily candle is the listing date. This adds no noticeable scan delay — the call is made only for the top-N coins that already passed the price and volume filter, and only if the filter is enabled.<br><br>
+  <strong>Tip:</strong> combine with a lower <strong>Top N</strong> (e.g. 50) and higher <strong>Min Volume</strong> to get a tight, high-quality list of new listings with genuine liquidity.
+</div>
+
+<div class="warn"><div class="warn-icon">⚠</div><div class="tip-body" style="color:#f08080;"><strong>New listings can be highly volatile.</strong> Always use the Trade Safety rules alongside this filter. The market structure gate (below) is especially useful here — new listings frequently show dead-cat bounces and lower-high structures in their first week.</div></div>
+
 <!-- MARKET CONTEXT GATE -->
-<h2 id="marketcontext">10 — Market Structure Gate <span class="new-badge">NEW v2.7.0</span></h2>
+<h2 id="marketcontext">11 — Market Structure Gate <span class="new-badge">NEW v2.7.0</span></h2>
 <div class="section-tag orange">Dead-cat &amp; downtrend filter</div>
 <p>Before a BUY, STRONG BUY, or PRE-BREAKOUT signal fires an alert, the <strong>Market Structure Gate</strong> analyses the last 25+ candles for bearish structural conditions. If the composite structure score is &leq;&nbsp;&minus;2, the signal is silently downgraded to NEUTRAL — no alert, no noise.</p>
 
@@ -603,7 +630,7 @@ hr{border:none;border-top:1px solid var(--border);margin:48px 0;}
 <div class="tip"><div class="tip-icon">💡</div><div class="tip-body"><strong>This gate runs entirely on candles already fetched</strong> — no extra API calls. It adds zero latency to scans.</div></div>
 
 <!-- WEBSOCKET -->
-<h2 id="websocket">11 — WebSocket Live Prices <span class="new-badge">NEW v2.2</span></h2>
+<h2 id="websocket">12 — WebSocket Live Prices <span class="new-badge">NEW v2.2</span></h2>
 <div class="section-tag">Real-time feed</div>
 <p>After the first scan completes, the app connects to Binance WebSocket and receives price updates in real-time — no polling, no delays.</p>
 
@@ -793,7 +820,7 @@ hr{border:none;border-top:1px solid var(--border);margin:48px 0;}
 
 <hr>
 <div class="footer">
-  Crypto Scalp Scanner v2.7.0 &nbsp;·&nbsp; Binance Spot API + WebSocket &nbsp;·&nbsp;
+  Crypto Scalp Scanner v2.8.0 &nbsp;·&nbsp; Binance Spot API + WebSocket &nbsp;·&nbsp;
   Logs: <code>CryptoScalper/logs/</code> &nbsp;·&nbsp;
   GitHub: <code>github.com/ZAKhan/crypto-scanner</code>
 </div>

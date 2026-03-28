@@ -38,6 +38,7 @@ OPTIONAL_FILES=(
     LICENSE
     CHANGELOG_v2_6_0.html
     CHANGELOG_v2_7_0.html
+    CHANGELOG_v2_8_0.html
 )
 
 ALL_OK=true
@@ -88,6 +89,7 @@ DOC_FILES=(
     LICENSE
     CHANGELOG_v2_6_0.html
     CHANGELOG_v2_7_0.html
+    CHANGELOG_v2_8_0.html
     tutorial.html
 )
 

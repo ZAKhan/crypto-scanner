@@ -6,7 +6,7 @@
 
 **Professional-grade Binance spot scanner, signal engine, and live trading terminal — all in one desktop app.**
 
-[![Version](https://img.shields.io/badge/version-v2.7.0-00e87a?style=for-the-badge&labelColor=0c1520)](https://github.com/ZAKhan/crypto-scanner/releases/latest)
+[![Version](https://img.shields.io/badge/version-v2.8.0-00e87a?style=for-the-badge&labelColor=0c1520)](https://github.com/ZAKhan/crypto-scanner/releases/latest)
 [![Python](https://img.shields.io/badge/Python-3.10+-3776ab?style=for-the-badge&logo=python&logoColor=white&labelColor=0c1520)](https://python.org)
 [![PyQt6](https://img.shields.io/badge/PyQt6-6.4+-41cd52?style=for-the-badge&labelColor=0c1520)](https://pypi.org/project/PyQt6/)
 [![License](https://img.shields.io/badge/License-MIT-ffd000?style=for-the-badge&labelColor=0c1520)](LICENSE)
@@ -34,6 +34,7 @@ Scan → Score → Alert → Trade → Protect
 | 📊 | **Multi-indicator scoring** | RSI · StochRSI · MACD · Bollinger Bands · ATR · S/R · Candlestick patterns |
 | 🔮 | **PRE-BREAKOUT detection** | Fires before the spike — BB squeeze + volume surge + RSI + support confluence |
 | 🧱 | **Market structure gate** | Blocks BUY entries into dead-cats, lower-high downtrends, and post-dump bounces |
+| 🆕 | **New listing filter** | Optionally limit scans to coins listed 2–10 days ago — configurable range |
 | 🛡 | **8-rule safety system** | BTC drop cooldown, trend freshness, per-symbol recovery gate, and more |
 | 📋 | **Signal audit log** | Every scan logged to daily CSV — 22 columns, 7-day retention |
 | 📈 | **Outcome tracking** | WIN/LOSS/FLAT recorded at 30min / 1h / 4h after every alert |
@@ -126,10 +127,10 @@ Create free testnet keys at [testnet.binance.vision](https://testnet.binance.vis
 | Module | Role |
 |---|---|
 | `cs/config.py` | Version, paths, `CFG` / scan settings |
-| `cs/api.py` | Binance REST helpers, `TRADING_CFG` |
+| `cs/api.py` | Binance REST helpers, `TRADING_CFG`, `fetch_listing_age_days()` |
 | `cs/indicators.py` | RSI · MACD · Bollinger · StochRSI · patterns · `analyse()` · `market_context()` |
 | `cs/trader.py` | `BinanceTrader` — all order operations (BUY, OCO, SELL) |
-| `cs/scanner.py` | `Scanner` / `ScanWorker` — manual scan thread |
+| `cs/scanner.py` | `Scanner` / `ScanWorker` — manual scan thread, new-listing gate |
 | `cs/alerts.py` | `AlertEngine` · `OutcomeTracker` — auto-scan and WIN/LOSS tracking |
 | `cs/safety.py` | `check_trade_safety()` — 8-rule safety gate |
 | `cs/sounds.py` | Pure-Python WAV alert sounds |
