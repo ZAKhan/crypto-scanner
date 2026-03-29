@@ -1,5 +1,6 @@
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -21,18 +22,21 @@ class Scanner:
     def start_scan(self):
         if self.scanning:
             return
+        self.scanning = True   # set BEFORE spawning to avoid race in _run_scan
         threading.Thread(target=self._scan, daemon=True).start()
 
     def _scan(self):
-        self.scanning = True
-        self.results  = []
+        self.results = []
         try:
             self.status = "Fetching 24h ticker data from Binance..."
             tickers = fetch_all_tickers()
             filtered = []
+            blocklist = CFG.get("symbol_blocklist", set())
             for t in tickers:
                 sym = t.get("symbol", "")
                 if not sym.endswith("USDT"):
+                    continue
+                if sym in blocklist:
                     continue
                 try:
                     price = float(t["lastPrice"])
@@ -45,18 +49,19 @@ class Scanner:
                                      "volume": vol, "change": chg})
             filtered.sort(key=lambda x: x["volume"], reverse=True)
             filtered = filtered[:CFG["top_n"]]
-            results   = []
-            errors    = []
-            total     = len(filtered)
-            for i, coin in enumerate(filtered):
+            results  = []
+            errors   = []
+            total    = len(filtered)
+            done_count = [0]
+            lock = threading.Lock()
+
+            def _analyse_coin(coin):
                 sym = coin["symbol"]
-                self.status   = f"Analysing {sym} ({i+1}/{total})..."
-                self.progress = (i + 1, total)
                 try:
                     if CFG.get("new_listing_filter"):
                         age = fetch_listing_age_days(sym)
                         if age is None or not (CFG["new_listing_min_days"] <= age <= CFG["new_listing_max_days"]):
-                            continue
+                            return None
                     raw  = fetch_klines(sym, CFG["interval"], CFG["candle_limit"])
                     t1h  = fetch_trend_1h(sym)
                     data = analyse(sym, raw, coin["change"], trend_1h=t1h)
@@ -75,10 +80,24 @@ class Scanner:
                     data["trend_1h"]   = t1h
                     data["volume_24h"] = coin["volume"]
                     data["change_24h"] = coin["change"]
-                    results.append(data)
-                    time.sleep(0.07)
+                    return data
                 except Exception as e:
                     errors.append(f"{sym}:{e}")
+                    return None
+                finally:
+                    with lock:
+                        done_count[0] += 1
+                        n = done_count[0]
+                    self.progress = (n, total)
+                    self.status   = f"Analysing... ({n}/{total})"
+
+            self.status = f"Analysing {total} coins in parallel..."
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                futures = {pool.submit(_analyse_coin, coin): coin for coin in filtered}
+                for future in as_completed(futures):
+                    data = future.result()
+                    if data:
+                        results.append(data)
 
             if not results:
                 self.status = f"No results. Errors: {errors[:3]}"

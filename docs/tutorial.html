@@ -1,0 +1,830 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Crypto Scalp Scanner v2.8.0 — User Guide</title>
+<style>
+:root {
+  --bg:#0a0e1a; --card:#1a2235; --border:#1e2d47;
+  --accent:#00d4ff; --green:#00ff88; --red:#ff3366;
+  --yellow:#ffcc00; --orange:#ff9900; --white:#e8f0fe; --dim:#4a5568; --dark2:#0f1525;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:var(--bg);color:var(--white);font-family:'Segoe UI','SF Pro Display',Inter,sans-serif;font-size:15px;line-height:1.6;}
+.page{max-width:1100px;margin:0 auto;padding:40px 24px 80px;}
+
+.hero{background:linear-gradient(135deg,#0f1525 0%,#1a2235 60%,#0d1c35 100%);border:1px solid var(--border);border-radius:16px;padding:48px 40px;margin-bottom:48px;position:relative;overflow:hidden;}
+.hero::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,var(--accent),var(--green),var(--yellow));}
+.hero-logo{display:flex;align-items:center;gap:14px;margin-bottom:16px;}
+.hero-dot{width:14px;height:14px;border-radius:50%;background:var(--green);box-shadow:0 0 12px var(--green);}
+.hero h1{font-size:36px;font-weight:900;letter-spacing:-1px;color:var(--accent);font-family:'JetBrains Mono','DejaVu Sans Mono',monospace;}
+.hero-sub{font-size:16px;color:var(--dim);margin-top:8px;max-width:700px;}
+.hero-badges{display:flex;gap:10px;margin-top:20px;flex-wrap:wrap;}
+.badge{background:var(--dark2);border:1px solid var(--border);border-radius:20px;padding:4px 14px;font-size:12px;color:var(--accent);font-family:monospace;}
+
+.toc{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:24px 28px;margin-bottom:40px;}
+.toc h3{color:var(--accent);margin-bottom:14px;font-size:16px;}
+.toc ol{padding-left:20px;}
+.toc li{padding:4px 0;}
+.toc a{color:var(--accent);text-decoration:none;font-size:14px;}
+.toc a:hover{text-decoration:underline;}
+
+h2{font-size:24px;font-weight:800;color:var(--accent);border-left:4px solid var(--accent);padding-left:14px;margin:52px 0 20px;}
+h3{font-size:17px;font-weight:700;color:var(--white);margin:28px 0 12px;}
+h4{font-size:13px;font-weight:700;color:var(--yellow);margin:18px 0 8px;text-transform:uppercase;letter-spacing:1px;}
+p{color:#b0bdd0;margin-bottom:12px;}
+
+.info{background:#111827;border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:8px;padding:16px 20px;margin:14px 0;}
+.info.green{border-left-color:var(--green);}
+.info.red{border-left-color:var(--red);}
+.info.yellow{border-left-color:var(--yellow);}
+.info.orange{border-left-color:var(--orange);}
+
+.step{display:flex;gap:14px;margin:14px 0;align-items:flex-start;}
+.step-num{background:var(--accent);color:#000;font-weight:900;font-size:13px;width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:2px;}
+.step-body{flex:1;}
+.step-title{font-weight:700;color:var(--white);margin-bottom:4px;}
+.step-desc{color:var(--dim);font-size:13px;}
+
+code{background:var(--dark2);border:1px solid var(--border);border-radius:4px;padding:2px 7px;font-family:'JetBrains Mono','DejaVu Sans Mono',monospace;font-size:12px;color:var(--accent);}
+pre{background:var(--dark2);border:1px solid var(--border);border-radius:8px;padding:16px 20px;margin:10px 0;font-family:'JetBrains Mono','DejaVu Sans Mono',monospace;font-size:12px;color:var(--green);overflow-x:auto;line-height:1.7;}
+kbd{background:#0a0e1a;border:1px solid #2a3a55;border-radius:4px;padding:2px 8px;font-family:monospace;font-size:12px;color:var(--accent);}
+
+.tip{background:#0d1f12;border:1px solid #1a4d2e;border-radius:8px;padding:14px 18px;margin:14px 0;display:flex;gap:12px;}
+.tip-icon{font-size:20px;flex-shrink:0;}
+.tip-body{font-size:13px;color:#7ecf9a;}
+.tip-body strong{color:var(--green);}
+
+.warn{background:#1f0d0d;border:1px solid #4d1a1a;border-radius:8px;padding:14px 18px;margin:14px 0;display:flex;gap:12px;}
+.warn-icon{font-size:20px;flex-shrink:0;}
+.warn-body{font-size:13px;color:#cf7e7e;}
+
+.section-tag{display:inline-block;background:var(--accent);color:#000;font-size:11px;font-weight:800;padding:2px 10px;border-radius:4px;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;}
+.section-tag.green{background:var(--green);}
+.section-tag.yellow{background:var(--yellow);}
+.section-tag.red{background:var(--red);}
+.section-tag.orange{background:var(--orange);}
+
+hr{border:none;border-top:1px solid var(--border);margin:48px 0;}
+
+.score-table{width:100%;border-collapse:collapse;font-size:13px;margin:12px 0;}
+.score-table th{color:var(--dim);padding:7px 12px;text-align:left;font-size:11px;text-transform:uppercase;border-bottom:1px solid var(--border);}
+.score-table td{padding:8px 12px;border-bottom:1px solid #12192a;vertical-align:top;}
+.g{color:var(--green);font-family:monospace;font-size:12px;}
+.r{color:var(--red);font-family:monospace;font-size:12px;}
+.y{color:var(--yellow);font-family:monospace;font-weight:700;}
+
+.flow{display:flex;align-items:center;gap:0;margin:20px 0;flex-wrap:wrap;}
+.flow-step{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px 16px;text-align:center;flex:1;min-width:100px;}
+.flow-icon{font-size:22px;margin-bottom:4px;}
+.flow-label{font-size:12px;font-weight:700;color:var(--white);}
+.flow-desc{font-size:11px;color:var(--dim);margin-top:2px;}
+.flow-arrow{color:var(--accent);font-size:20px;padding:0 4px;flex-shrink:0;}
+
+.shortcuts{display:flex;flex-wrap:wrap;gap:10px;margin:14px 0;}
+.shortcut{background:var(--dark2);border:1px solid var(--border);border-radius:6px;padding:8px 14px;display:flex;align-items:center;gap:10px;}
+.shortcut-desc{font-size:12px;color:var(--dim);}
+
+.signal-badge{display:inline-block;padding:3px 12px;border-radius:12px;font-size:12px;font-weight:800;font-family:monospace;}
+.sb-strong-buy{background:#003320;color:#00ff88;border:1px solid #00ff88;}
+.sb-buy{background:#002218;color:#00cc66;border:1px solid #00cc66;}
+.sb-pre{background:#2a1800;color:#ff9900;border:1px solid #ff9900;}
+.sb-sell{background:#220011;color:#ff3366;border:1px solid #ff3366;}
+.sb-neutral{background:#1a1a1a;color:#666;border:1px solid #333;}
+
+.safety-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:16px 0;}
+.safety-item{background:#111827;border:1px solid var(--border);border-radius:8px;padding:14px 16px;}
+.safety-title{color:var(--white);font-weight:700;font-size:13px;margin-bottom:4px;}
+.safety-desc{color:var(--dim);font-size:12px;}
+.safety-default{display:inline-block;background:#002218;color:var(--green);font-size:10px;font-weight:800;padding:2px 8px;border-radius:4px;margin-bottom:6px;}
+
+.path-table{width:100%;border-collapse:collapse;font-size:13px;margin:12px 0;}
+.path-table th{color:var(--dim);padding:7px 12px;text-align:left;font-size:11px;text-transform:uppercase;border-bottom:1px solid var(--border);}
+.path-table td{padding:8px 12px;border-bottom:1px solid #12192a;font-family:monospace;font-size:12px;color:var(--accent);}
+.path-table td:first-child{color:var(--white);font-family:inherit;}
+
+.footer{text-align:center;color:var(--dim);font-size:12px;padding:20px 0;}
+
+.new-badge{display:inline-block;background:var(--orange);color:#000;font-size:10px;font-weight:800;padding:1px 7px;border-radius:4px;margin-left:6px;vertical-align:middle;}
+</style>
+</head>
+<body>
+<div class="page">
+
+<!-- HERO -->
+<div class="hero">
+  <div class="hero-logo">
+    <div class="hero-dot"></div>
+    <h1>⚡ CRYPTO SCALP SCANNER — User Guide</h1>
+  </div>
+  <p class="hero-sub">Professional Binance scanner for sub-$1 coins. Multi-indicator scoring, live trading with OCO stop-loss, WebSocket real-time prices, trade safety system, and full signal audit logging.</p>
+  <div class="hero-badges">
+    <span class="badge">v2.8.0</span>
+    <span class="badge">Python 3.10+</span>
+    <span class="badge">PyQt6</span>
+    <span class="badge">Binance Spot API</span>
+    <span class="badge">Linux · Windows · macOS</span>
+    <span class="badge">WebSocket Live Prices</span>
+  </div>
+</div>
+
+<!-- TOC -->
+<div class="toc">
+  <h3>📋 Table of Contents</h3>
+  <ol>
+    <li><a href="#install">Installation</a></li>
+    <li><a href="#scanner">Tab 1 — Scanner</a></li>
+    <li><a href="#toppicks">Tab 2 — Top Picks</a></li>
+    <li><a href="#config">Tab 3 — Config</a></li>
+    <li><a href="#alerts">Tab 4 — Alerts</a></li>
+    <li><a href="#trades">Tab 5 — Trades</a></li>
+    <li><a href="#trading">Live Trading</a></li>
+    <li><a href="#safety">Trade Safety System</a></li>
+    <li><a href="#prebreakout">PRE-BREAKOUT Signal</a></li>
+    <li><a href="#websocket">WebSocket Live Prices</a></li>
+    <li><a href="#signallog">Signal Audit Log</a></li>
+    <li><a href="#outcome">Outcome Tracking</a></li>
+    <li><a href="#scoring">How Scoring Works</a></li>
+    <li><a href="#workflow">Full Workflow Example</a></li>
+    <li><a href="#shortcuts">Keyboard &amp; Mouse Shortcuts</a></li>
+  </ol>
+</div>
+
+<!-- INSTALL -->
+<h2 id="install">1 — Installation</h2>
+<div class="step">
+  <div class="step-num">1</div>
+  <div class="step-body">
+    <div class="step-title">Install Python dependencies</div>
+    <pre>pip install PyQt6 requests websocket-client</pre>
+    <div class="step-desc">On Arch/CachyOS: <code>pip install PyQt6 requests websocket-client --break-system-packages</code></div>
+  </div>
+</div>
+<div class="step">
+  <div class="step-num">2</div>
+  <div class="step-body">
+    <div class="step-title">Run the app</div>
+    <pre>python crypto_scanner.py</pre>
+  </div>
+</div>
+<div class="step">
+  <div class="step-num">3</div>
+  <div class="step-body">
+    <div class="step-title">Or build a standalone binary</div>
+    <pre>./build.sh</pre>
+    <div class="step-desc">Installs to <code>~/.local/bin/crypto_scanner</code> and registers in app menu under Finance.</div>
+  </div>
+</div>
+
+<div class="tip"><div class="tip-icon">💡</div><div class="tip-body"><strong>No API key needed for scanning.</strong> The scanner uses Binance public endpoints. API keys are only required for placing live trades.</div></div>
+
+<!-- SCANNER TAB -->
+<h2 id="scanner">2 — Tab 1: Scanner</h2>
+<div class="section-tag">Main view</div>
+<p>The Scanner tab shows all coins ranked by signal quality. A scan runs automatically every 30 seconds. Hit ⚡ for an immediate scan.</p>
+
+<h3>Signal Badges</h3>
+<p>Each row shows a coloured signal badge:</p>
+<div style="display:flex;gap:10px;flex-wrap:wrap;margin:14px 0;">
+  <span class="signal-badge sb-pre">⚡ PRE-BREAKOUT</span>
+  <span class="signal-badge sb-strong-buy">STRONG BUY</span>
+  <span class="signal-badge sb-buy">BUY</span>
+  <span class="signal-badge sb-neutral">NEUTRAL</span>
+  <span class="signal-badge sb-sell">STRONG SELL</span>
+</div>
+<p><span class="signal-badge sb-pre">⚡ PRE-BREAKOUT</span> is shown in orange and appears at the top — it signals early coiling before a potential price spike.</p>
+
+<h3>Scanner Columns</h3>
+<table class="score-table">
+  <thead><tr><th>Column</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><strong>#</strong></td><td>Rank by signal strength + potential</td></tr>
+    <tr><td><strong>SYMBOL</strong></td><td>Coin name — click to open on Binance</td></tr>
+    <tr><td><strong>PRICE</strong></td><td>Current price updated via WebSocket</td></tr>
+    <tr><td><strong>24H%</strong></td><td>24-hour price change</td></tr>
+    <tr><td><strong>RSI</strong></td><td>14-period Relative Strength Index</td></tr>
+    <tr><td><strong>STRSI</strong></td><td>Stochastic RSI</td></tr>
+    <tr><td><strong>MACD</strong></td><td>MACD histogram — ▲ rising / ▼ falling</td></tr>
+    <tr><td><strong>BB%</strong></td><td>Position within Bollinger Bands — 0% = bottom, 100% = top</td></tr>
+    <tr><td><strong>VOL 24H</strong></td><td>24-hour trading volume in USDT</td></tr>
+    <tr><td><strong>SIGNAL</strong></td><td>Confluence signal badge</td></tr>
+    <tr><td><strong>POT%</strong></td><td>Estimated profit potential to resistance</td></tr>
+    <tr><td><strong>EXP%</strong></td><td>Expected price move based on ATR + BB width</td></tr>
+    <tr><td><strong>L/S</strong></td><td>Long score / Short score</td></tr>
+    <tr><td><strong>PATTERN</strong></td><td>Detected candlestick pattern</td></tr>
+    <tr><td><strong>CHART</strong></td><td>Live sparkline mini-chart</td></tr>
+    <tr><td><strong>AGE</strong></td><td>How long signal has been active</td></tr>
+    <tr><td><strong>CONF</strong></td><td>Confidence — consecutive scans at same signal</td></tr>
+    <tr><td><strong>1H</strong></td><td>1-hour trend direction ↑ ↓ →</td></tr>
+  </tbody>
+</table>
+
+<h3>Right-click Menu</h3>
+<div class="info">
+  Right-click any coin row for:<br><br>
+  • <strong style="color:var(--green)">📈 BUY {coin}</strong> — open a buy trade (requires API key)<br>
+  • <strong style="color:var(--dim)">📉 SELL (coming soon)</strong> — margin short trading — disabled in v2.2<br>
+  • <strong>🔍 View Details</strong> — full indicator breakdown popup<br>
+  • <strong>🌐 Open on Binance</strong> — 5m chart in browser<br>
+  • <strong>📊 Open on TradingView</strong> — opens in local TradingView app
+</div>
+
+<h3>Status Bar</h3>
+<div class="info">
+  Bottom status bar shows:<br><br>
+  • <strong>Left:</strong> Last scan result — e.g. <code>Auto-scan: 23 coins [13:25:23]</code><br>
+  • <strong>Right:</strong> Scan dot 🟢 (idle) / 🔵 blinking (scanning) &nbsp;·&nbsp; <code>⚡ WS</code> green = WebSocket live &nbsp;·&nbsp; Version badge
+</div>
+
+<!-- TOP PICKS -->
+<h2 id="toppicks">3 — Tab 2: Top Picks</h2>
+<div class="section-tag green">Best signals</div>
+<p>Top Picks shows the best coins from the last scan as cards, grouped into three sections:</p>
+
+<div class="info orange">
+  <strong style="color:var(--orange)">⚡ PRE-BREAKOUT</strong> — coins showing BB squeeze + volume build + RSI recovery + price at support. Early warning before a potential spike.
+</div>
+<div class="info green">
+  <strong style="color:var(--green)">🟢 LONG CANDIDATES</strong> — STRONG BUY and BUY signals ranked by potential.
+</div>
+<div class="info red">
+  <strong style="color:var(--red)">🔴 SHORT CANDIDATES</strong> — STRONG SELL and SELL signals.
+</div>
+
+<p>Each card shows entry price, suggested SL/TP, R/R ratio, and key indicators. Click a card to open the trade dialog.</p>
+
+<!-- CONFIG -->
+<h2 id="config">4 — Tab 3: Config</h2>
+<div class="section-tag yellow">Settings</div>
+<p>The Config tab is arranged in a 2-column grid. Settings are saved automatically when you close the app.</p>
+
+<h3>SCAN FILTERS (left column, row 1)</h3>
+<table class="score-table">
+  <thead><tr><th>Setting</th><th>Default</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td>Max Price ($)</td><td>$1.00</td><td>Only scan coins below this price</td></tr>
+    <tr><td>Min Volume (USDT)</td><td>$1,000,000</td><td>Only scan coins with sufficient liquidity</td></tr>
+    <tr><td>Interval</td><td>5m</td><td>Candle timeframe for analysis</td></tr>
+    <tr><td>Top N coins</td><td>30</td><td>How many coins to analyse per scan</td></tr>
+    <tr><td>Top Picks to show</td><td>5</td><td>Max cards per section in Top Picks</td></tr>
+    <tr><td>Candles to fetch</td><td>50</td><td>Candle history for indicator calculation</td></tr>
+  </tbody>
+</table>
+
+<h3>RISK MANAGEMENT (right column, row 1)</h3>
+<table class="score-table">
+  <thead><tr><th>Setting</th><th>Default</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td>Stop Loss %</td><td>3%</td><td>Default SL distance from entry</td></tr>
+    <tr><td>Take Profit %</td><td>5%</td><td>Default TP1 distance from entry</td></tr>
+    <tr><td>TP2 % (extended)</td><td>10%</td><td>Extended target shown in Top Picks cards</td></tr>
+    <tr><td>R/R Ratio</td><td>auto</td><td>Calculated live from SL/TP values</td></tr>
+  </tbody>
+</table>
+
+<h3>TRADE SAFETY (left column, row 2) <span class="new-badge">UPDATED v2.4.2</span></h3>
+<p>Each rule can be individually enabled or disabled with its own checkbox. Three new protections added in v2.4.2 based on live trade post-mortem analysis.</p>
+<div class="safety-grid">
+  <div class="safety-item">
+    <div class="safety-default">ON by default</div>
+    <div class="safety-title">Signal must hold 2+ scans</div>
+    <div class="safety-desc">Signal must appear on 2 consecutive scans before trade is allowed. Eliminates 40-50% of false entries.</div>
+  </div>
+  <div class="safety-item">
+    <div class="safety-default">ON by default</div>
+    <div class="safety-title">Skip if BTC dropping &gt; 2%</div>
+    <div class="safety-desc">Skips trades when BTC is falling. 80% of altcoins follow BTC down regardless of their own signals.</div>
+  </div>
+  <div class="safety-item">
+    <div class="safety-default">ON · 60 min · NEW v2.4.2</div>
+    <div class="safety-title">BTC drop cooldown</div>
+    <div class="safety-desc">After BTC drop triggers, blocks new LONGs for 60 minutes (configurable). Lifts early if BTC recovers 1.5% from its drop low. Prevents re-entry mid-crash when the 24h % briefly recovers.</div>
+  </div>
+  <div class="safety-item">
+    <div class="safety-default">ON · 1.5% · NEW v2.4.2</div>
+    <div class="safety-title">1h trend freshness check</div>
+    <div class="safety-desc">If the coin is already &gt;1.5% below its current 1h candle open, <code>trend_1h='up'</code> is treated as stale and the LONG is blocked. Prevents entering falling-knife moves showing an outdated uptrend label.</div>
+  </div>
+  <div class="safety-item">
+    <div class="safety-default">ON · 1% bounce · NEW v2.4.2</div>
+    <div class="safety-title">Per-symbol recovery gate</div>
+    <div class="safety-desc">After a safety block fires for a coin, requires a 1% bounce from the block price before a new LONG is allowed. Max lock: 30 minutes. Stops repeated entries during a sustained drop.</div>
+  </div>
+  <div class="safety-item">
+    <div class="safety-default">ON by default</div>
+    <div class="safety-title">Skip if coin down &gt; 5% in 24h</div>
+    <div class="safety-desc">Avoids entering coins already in a downtrend.</div>
+  </div>
+  <div class="safety-item">
+    <div class="safety-default">ON by default</div>
+    <div class="safety-title">Max open trades (3)</div>
+    <div class="safety-desc">Hard limit on concurrent positions. Prevents overexposure.</div>
+  </div>
+  <div class="safety-item">
+    <div class="safety-default">ON by default</div>
+    <div class="safety-title">Daily loss limit ($100)</div>
+    <div class="safety-desc">Circuit breaker — stops all trading if daily losses exceed the threshold. Resets automatically each day.</div>
+  </div>
+</div>
+<div class="tip"><div class="tip-icon">💡</div><div class="tip-body"><strong>Override is always available.</strong> When a safety rule blocks a trade, a dialog explains why and gives you the option to override and trade anyway. You are always in control.</div></div>
+
+<h3>BINANCE API</h3>
+<div class="step">
+  <div class="step-num">1</div>
+  <div class="step-body">
+    <div class="step-title">Get API keys from Binance</div>
+    <div class="step-desc">binance.com → Account → API Management → Create API → Enable Reading + Enable Spot Trading only. Restrict to your IP for safety.</div>
+  </div>
+</div>
+<div class="step">
+  <div class="step-num">2</div>
+  <div class="step-body">
+    <div class="step-title">Start with Testnet</div>
+    <div class="step-desc">Create testnet keys at <code>testnet.binance.vision</code> (login with GitHub). Keep TESTNET MODE enabled until fully tested.</div>
+  </div>
+</div>
+<div class="step">
+  <div class="step-num">3</div>
+  <div class="step-body">
+    <div class="step-title">Test Connection</div>
+    <div class="step-desc">Click Test Connection — shows your balance. Click Apply Settings.</div>
+  </div>
+</div>
+<div class="warn"><div class="warn-icon">⚠️</div><div class="warn-body"><strong>Never enable withdrawal permissions on your API key.</strong> Only TRADE and USER_DATA permissions are needed. Always restrict to your IP address.</div></div>
+
+<!-- ALERTS -->
+<h2 id="alerts">5 — Tab 4: Alerts</h2>
+<div class="section-tag">Notifications</div>
+<p>The Alerts tab has two sub-tabs — <strong style="color:var(--accent)">📋 Alerts</strong> for history and <strong style="color:var(--accent)">⚙ Settings</strong> for configuration.</p>
+
+<h3>📋 Alerts Sub-tab — History Table</h3>
+<div class="info green">
+  Same look and feel as the Trades tab — always shows column headers even when empty.
+</div>
+<table class="score-table">
+  <thead><tr><th>Column</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td>TIME</td><td>When the alert fired</td></tr>
+    <tr><td>SYMBOL</td><td>Coin that triggered the alert</td></tr>
+    <tr><td>SIGNAL</td><td>STRONG BUY / BUY / PRE-BREAKOUT etc.</td></tr>
+    <tr><td>DETAILS</td><td>RSI · Exp% · Pot% · Vol ratio · Pattern</td></tr>
+    <tr><td>PRICE</td><td>Price at time of alert</td></tr>
+  </tbody>
+</table>
+<div class="info">
+  • Latest alert always at top — newest first<br>
+  • Last 20 alerts saved and restored between app restarts<br>
+  • Count badge updates live: <code>📋 Alerts (5)</code><br>
+  • Auto-switches to this tab when a new alert fires<br>
+  • Clear Log button resets history
+</div>
+<h3>Right-click Alert Rows <span class="new-badge">NEW v2.4.2</span></h3>
+<div class="info orange">
+  Right-click any row in the Alerts history table to get the same context menu as the Scanner tab.
+</div>
+<div class="info">
+  • <strong>📈 BUY {coin}</strong> — opens trade dialog pre-filled with the alert's symbol, signal, and price<br>
+  • <strong>🌐 Open on Binance</strong> — 5m chart in your configured browser<br>
+  • <strong>📊 Open on TradingView</strong> — TradingView chart in your configured browser<br><br>
+  The menu label reflects the original signal — e.g. <em>📈 BUY KAT ← STRONG BUY</em>. All three options respect the custom browser path set in Config → UI Appearance.
+</div>
+
+<h3>⚙ Settings Sub-tab — Configuration</h3>
+<p>Two-column layout: AUTO-SCAN TRIGGER filters on the left, NOTIFICATION CHANNELS on the right.</p>
+
+<table class="score-table">
+  <thead><tr><th>Filter</th><th>Default</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td>Scan interval</td><td>30s</td><td>How often the background scan runs</td></tr>
+    <tr><td>Minimum signal</td><td>STRONG BUY</td><td>Only alert for this signal or stronger</td></tr>
+    <tr><td>Min Potential %</td><td>40%</td><td>Only alert if POT% meets threshold</td></tr>
+    <tr><td>Min Exp Move %</td><td>3%</td><td>Only alert if expected move is significant</td></tr>
+    <tr><td>Max RSI</td><td>70</td><td>Skip overbought coins</td></tr>
+    <tr><td>Max BB%</td><td>80%</td><td>Skip coins near top of Bollinger Band</td></tr>
+    <tr><td>Min ADR %</td><td>0.5%</td><td>Skip flat coins with tiny avg candle range</td></tr>
+    <tr><td><strong style="color:var(--orange)">Min Vol Ratio ⚡</strong></td><td>0.8x</td><td>Blocks 70-80% of false alerts — dying volume coins like ROBO skipped</td></tr>
+    <tr><td><strong style="color:var(--orange)">Block Downtrend ⚡</strong></td><td>ON</td><td>Skip when candlestick shows Downtrend ↓</td></tr>
+    <tr><td><strong style="color:var(--orange)">Post-spike cooldown ⚡</strong></td><td>ON 15%</td><td>Spiked &gt;15% in 3h → silence for 2 hours</td></tr>
+    <tr><td><strong style="color:var(--orange)">Require MACD rising ⚡</strong></td><td>OFF</td><td>Optional — only alert if momentum building</td></tr>
+    <tr><td><strong style="color:var(--orange)">Per-coin cooldown ⚡</strong></td><td>30 min</td><td>ROBO: 82 alerts → 2 per day</td></tr>
+    <tr><td>Require volume spike</td><td>Off</td><td>Only alert if volume is 2x+ average</td></tr>
+  </tbody>
+</table>
+
+<div class="info orange" style="margin:16px 0;">
+  <strong style="color:var(--orange)">⚡ Alert Quality Fixes — Proven Results</strong><br><br>
+  Before: 265 alerts on Mar 18 (82 from ROBO alone) · After: <strong>11 alerts — 95.8% reduction</strong><br>
+  Key insight: <strong>70-80% of false alerts had vol_ratio &lt; 0.8x</strong> — dying volume after a dump.
+</div>
+
+<h3>NOTIFICATION CHANNELS</h3>
+<div class="info">
+  • <strong>🔊 Sound alert</strong> — Ascending = BUY, Descending = SELL, 3-tone = PRE-BREAKOUT<br>
+  • <strong>🖥 Desktop notification</strong> — via notify-send (Linux)<br>
+  • <strong>✈️ Telegram bot</strong> — enter bot token + chat ID<br>
+  • <strong>📱 WhatsApp</strong> — via PicoClaw integration
+</div>
+
+<!-- TRADES -->
+<h2 id="trades">6 — Tab 5: Trades</h2>
+<div class="section-tag green">Journal</div>
+<p>All trades are saved to <code>CryptoScalper/logs/trades.json</code> and persist between sessions.</p>
+
+<h3>Opening a Trade</h3>
+<div class="flow">
+  <div class="flow-step"><div class="flow-icon">📊</div><div class="flow-label">Scanner Tab</div><div class="flow-desc">Find STRONG BUY signal</div></div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-step"><div class="flow-icon">🖱</div><div class="flow-label">Right-click</div><div class="flow-desc">Select BUY {coin}</div></div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-step"><div class="flow-icon">✅</div><div class="flow-label">Trade Dialog</div><div class="flow-desc">Review entry/SL/TP/qty</div></div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-step"><div class="flow-icon">💰</div><div class="flow-label">Trades Tab</div><div class="flow-desc">Live P&L via WebSocket</div></div>
+</div>
+
+<h3>Trade Dialog</h3>
+<div class="info">
+  • Balance shown live — use 25/50/75/100% quick-fill buttons<br>
+  • Entry price auto-filled from current price<br>
+  • SL and TP fields sync bidirectionally — change price → % updates, change % → price updates<br>
+  • Cost, SL risk, TP gain, and R/R ratio shown live<br>
+  • OCO stop-loss placed automatically on Binance after BUY executes
+</div>
+
+<h3>Closing a Trade</h3>
+<div class="info green">
+  <strong style="color:var(--green)">Option 1 — Auto-close (recommended)</strong><br>
+  Set TP when opening. WebSocket detects price crossing TP → app places market SELL automatically within milliseconds.
+</div>
+<div class="info">
+  <strong>Option 2 — Manual close</strong><br>
+  Right-click trade row → Close → confirm at current price. App cancels OCO and places market SELL.
+</div>
+
+<h3>OCO Stop-Loss Protection</h3>
+<div class="info red">
+  <strong style="color:var(--red)">⚡ Always protected — even if app closes</strong><br><br>
+  Every BUY automatically places an OCO order on Binance: a limit sell at TP and a stop-loss at SL.<br>
+  When one fires, the other cancels automatically.<br><br>
+  Your stop-loss lives on Binance's servers — it fires even if the app crashes, your PC restarts, or internet drops.
+</div>
+
+<h3>Trade Statistics</h3>
+<p>The stats panel shows: total trades, open, wins, losses, win rate, avg win/loss, best/worst trade, profit factor, total P&L, and equity curve chart.</p>
+
+<!-- LIVE TRADING -->
+<h2 id="trading">7 — Live Trading</h2>
+<div class="section-tag red">Real money</div>
+
+<div class="warn"><div class="warn-icon">⚠️</div><div class="warn-body"><strong>Always test on testnet first.</strong> Run for at least 1-2 weeks on testnet before switching to live. Understand the safety rules and set sensible limits before going live.</div></div>
+
+<h3>Switching to Live Mode</h3>
+<div class="step">
+  <div class="step-num">1</div>
+  <div class="step-body">
+    <div class="step-title">Create live API keys on Binance</div>
+    <div class="step-desc">binance.com → Account → API Management. Enable: Reading + Spot Trading. Restrict to your IP. Never enable withdrawals.</div>
+  </div>
+</div>
+<div class="step">
+  <div class="step-num">2</div>
+  <div class="step-body">
+    <div class="step-title">Enter keys in Config tab → BINANCE API</div>
+    <div class="step-desc">Paste API Key and Secret. Click the green TESTNET button → confirm → it turns red LIVE.</div>
+  </div>
+</div>
+<div class="step">
+  <div class="step-num">3</div>
+  <div class="step-body">
+    <div class="step-title">Verify with Test Connection</div>
+    <div class="step-desc">Should show your real USDT balance. A red LIVE banner appears at top of window.</div>
+  </div>
+</div>
+<div class="step">
+  <div class="step-num">4</div>
+  <div class="step-body">
+    <div class="step-title">Review Trade Safety settings</div>
+    <div class="step-desc">All 5 safety rules are ON by default. Set a sensible daily loss limit. Start with small position sizes.</div>
+  </div>
+</div>
+
+<!-- SAFETY SYSTEM -->
+<h2 id="safety">8 — Trade Safety System <span class="new-badge">NEW v2.2</span></h2>
+<div class="section-tag orange">Risk management</div>
+<p>Before any trade executes, the app runs all enabled safety checks. If any rule fails, a dialog explains why and asks if you want to override.</p>
+
+<div class="info yellow">
+  <strong style="color:var(--yellow)">Signal persistence is the most impactful rule.</strong><br>
+  Requiring a signal to hold for 2 consecutive scans (~60 seconds) eliminates 40-50% of false entries caused by brief spikes that immediately reverse.
+</div>
+
+<table class="score-table">
+  <thead><tr><th>Rule</th><th>Default</th><th>Why it matters</th></tr></thead>
+  <tbody>
+    <tr><td>Signal persistence</td><td class="g">ON — 2 scans</td><td>Eliminates one-scan false signals</td></tr>
+    <tr><td>BTC trend check</td><td class="g">ON — &gt;2% drop</td><td>80% of altcoins follow BTC down</td></tr>
+    <tr><td>Coin trend check</td><td class="g">ON — &gt;5% drop</td><td>Avoids entering downtrends</td></tr>
+    <tr><td>Max open trades</td><td class="g">ON — max 3</td><td>Prevents overexposure</td></tr>
+    <tr><td>Daily loss limit</td><td class="g">ON — $100</td><td>Circuit breaker — stops digging a deeper hole</td></tr>
+  </tbody>
+</table>
+
+<!-- PRE-BREAKOUT -->
+<h2 id="prebreakout">9 — PRE-BREAKOUT Signal <span class="new-badge">NEW v2.2</span></h2>
+<div class="section-tag orange">Early warning</div>
+<p>PRE-BREAKOUT fires before a coin moves — not after. It detects coins quietly coiling before a price spike by requiring all conditions simultaneously:</p>
+
+<div class="safety-grid">
+  <div class="safety-item">
+    <div class="safety-title">BB Width 1.5–5%</div>
+    <div class="safety-desc">Bollinger Bands squeezed tight — price ranging in a narrow band. The floor of 1.5% prevents firing when bands are too close together to be meaningful. <span class="new-badge">UPDATED v2.4.3</span></div>
+  </div>
+  <div class="safety-item">
+    <div class="safety-title">Volume ≥ 1.5× average</div>
+    <div class="safety-desc">Unusual volume building quietly. Smart money accumulating before the move.</div>
+  </div>
+  <div class="safety-item">
+    <div class="safety-title">RSI between 35–55</div>
+    <div class="safety-desc">Not overbought, recovering from oversold. Price has room to move up.</div>
+  </div>
+  <div class="safety-item">
+    <div class="safety-title">Price in bottom 25% of BB range</div>
+    <div class="safety-desc">Price sitting near the lower Bollinger Band — at support. Primed for a bounce.</div>
+  </div>
+  <div class="safety-item">
+    <div class="safety-title">Not at resistance <span class="new-badge">NEW v2.4.3</span></div>
+    <div class="safety-desc">Price must be more than 1% below the 15-candle high. If price is already at the recent ceiling, the signal is blocked — entering at resistance is the wrong side of the trade.</div>
+  </div>
+</div>
+
+<div class="tip"><div class="tip-icon">💡</div><div class="tip-body"><strong>PRE-BREAKOUT appears first in both Scanner and Top Picks</strong>, above STRONG BUY. It has its own orange badge and distinct 3-tone ascending alert sound. Use it to get ahead of the move.</div></div>
+
+<h3>Rejection ↓ Pattern <span class="new-badge">NEW v2.4.3</span></h3>
+<p>A new candlestick pattern added in v2.4.3. Fires when 2 or more of the last 3 candles have an upper wick larger than their body — repeated rejection at the highs. This pattern is treated as bearish (same as Downtrend ↓) and blocks alerts when <strong>Block Downtrend pattern</strong> is enabled in Alert Settings.</p>
+<p>This directly addresses the PHAUSDT post-mortem: the scanner was firing PRE-BREAKOUT on a coin showing repeated upper wick rejection at resistance — a distribution signal, not accumulation.</p>
+
+<!-- NEW LISTING FILTER -->
+<h2 id="newlisting">10 — New Listing Filter <span class="new-badge">NEW v2.8.0</span></h2>
+<div class="section-tag orange">Recently listed coins only</div>
+<p>When enabled, the scanner skips all coins that were listed outside your chosen day range. Only coins that first traded on Binance between <strong>min days</strong> and <strong>max days</strong> ago pass through to analysis.</p>
+
+<div class="safety-grid">
+  <div class="safety-item">
+    <div class="safety-title">New listing filter (checkbox)</div>
+    <div class="safety-desc">Master switch. Off by default — existing scan behaviour is unchanged until you enable it. Found in <strong>Config → Scan Filters</strong>.</div>
+  </div>
+  <div class="safety-item">
+    <div class="safety-title">Listed min (default: 2 days)</div>
+    <div class="safety-desc">Skips coins listed within the last 2 days. Day-one and day-two listings are excluded — they have no reliable volume baseline and are prone to pump-and-dump manipulation.</div>
+  </div>
+  <div class="safety-item">
+    <div class="safety-title">Listed max (default: 10 days)</div>
+    <div class="safety-desc">Skips coins older than this. Set to 90 days maximum if you want a wider new-listing window. The sweet spot is 2–10 days — enough price history for indicators to be meaningful, still in the early hype cycle.</div>
+  </div>
+</div>
+
+<div class="info">
+  <strong>How listing age is detected:</strong> one lightweight REST call per coin to <code>/api/v3/klines</code> (interval=1d, limit=1, startTime=Jan 2017). The open timestamp of the first daily candle is the listing date. This adds no noticeable scan delay — the call is made only for the top-N coins that already passed the price and volume filter, and only if the filter is enabled.<br><br>
+  <strong>Tip:</strong> combine with a lower <strong>Top N</strong> (e.g. 50) and higher <strong>Min Volume</strong> to get a tight, high-quality list of new listings with genuine liquidity.
+</div>
+
+<div class="warn"><div class="warn-icon">⚠</div><div class="tip-body" style="color:#f08080;"><strong>New listings can be highly volatile.</strong> Always use the Trade Safety rules alongside this filter. The market structure gate (below) is especially useful here — new listings frequently show dead-cat bounces and lower-high structures in their first week.</div></div>
+
+<!-- MARKET CONTEXT GATE -->
+<h2 id="marketcontext">11 — Market Structure Gate <span class="new-badge">NEW v2.7.0</span></h2>
+<div class="section-tag orange">Dead-cat &amp; downtrend filter</div>
+<p>Before a BUY, STRONG BUY, or PRE-BREAKOUT signal fires an alert, the <strong>Market Structure Gate</strong> analyses the last 25+ candles for bearish structural conditions. If the composite structure score is &leq;&nbsp;&minus;2, the signal is silently downgraded to NEUTRAL — no alert, no noise.</p>
+
+<div class="safety-grid">
+  <div class="safety-item">
+    <div class="safety-title">EMA-50 Slope (trend)</div>
+    <div class="safety-desc">If the 50-period EMA has declined more than 0.3% over the last 20 bars, the trend is flagged as <strong>down</strong> (−1 to score). A rising slope adds +1.</div>
+  </div>
+  <div class="safety-item">
+    <div class="safety-title">Lower Highs</div>
+    <div class="safety-desc">Detects 3 consecutive swing highs each lower than the last — a classic lower-high downtrend structure. Subtracts 2 from score. Shown in tooltip as <em>lower-highs</em>.</div>
+  </div>
+  <div class="safety-item">
+    <div class="safety-title">Lower Lows</div>
+    <div class="safety-desc">Two consecutive swing lows each lower than the previous. Subtracts 1 from score. Shown in tooltip as <em>lower-lows</em>.</div>
+  </div>
+  <div class="safety-item">
+    <div class="safety-title">Dump Detector</div>
+    <div class="safety-desc">Looks for a big red candle in the last 10 bars with body &gt; 0.5% and volume &gt; 2× average. If found, subtracts 1 and records the volume multiple.</div>
+  </div>
+  <div class="safety-item">
+    <div class="safety-title">Bounce Quality</div>
+    <div class="safety-desc">After a dump candle, checks if the last 3 candles' average volume is at least 60% of the dump candle's volume. Weak bounce = −1, strong bounce = +1. Weak bounces shown as <em>dead-cat risk</em>.</div>
+  </div>
+  <div class="safety-item">
+    <div class="safety-title">Volume Character (last 5 bars)</div>
+    <div class="safety-desc">If &gt;65% of recent volume is on green candles = buying pressure (+1). If &lt;35% = selling pressure (−1, shown as <em>sell pressure</em>).</div>
+  </div>
+</div>
+
+<div class="info">
+  <strong>Structure Score:</strong> ranges from −3 to +3. Score &leq; −2 blocks the signal. Hover over any signal cell in the Scanner table to see the <strong>block reason</strong> — e.g. <code>lower-highs | dead-cat risk</code> or <code>Context: downtrend | sell pressure</code>.<br><br>
+  A score of −1 or 0 still allows the signal through but the reason is visible in the tooltip for your own judgement.
+</div>
+
+<div class="tip"><div class="tip-icon">💡</div><div class="tip-body"><strong>This gate runs entirely on candles already fetched</strong> — no extra API calls. It adds zero latency to scans.</div></div>
+
+<!-- WEBSOCKET -->
+<h2 id="websocket">12 — WebSocket Live Prices <span class="new-badge">NEW v2.2</span></h2>
+<div class="section-tag">Real-time feed</div>
+<p>After the first scan completes, the app connects to Binance WebSocket and receives price updates in real-time — no polling, no delays.</p>
+
+<div class="info">
+  <strong>What WebSocket improves:</strong><br><br>
+  • P&L in Trades tab updates every 3 seconds instead of 3s + network round trip<br>
+  • TP/SL detection fires in milliseconds instead of up to 3 seconds<br>
+  • Zero API rate limit usage for price updates<br>
+  • Auto-reconnects if connection drops
+</div>
+
+<div class="info green">
+  <strong>Status indicator:</strong> The <code>⚡ WS</code> label in the bottom-right status bar shows connection state:<br>
+  <span style="color:var(--green)">Green</span> = connected, live prices flowing &nbsp;·&nbsp;
+  <span style="color:var(--yellow)">Yellow</span> = disconnected, reconnecting
+</div>
+
+<!-- SIGNAL LOG -->
+<h2 id="signallog">11 — Signal Audit Log <span class="new-badge">NEW v2.2</span></h2>
+<div class="section-tag orange">Analysis &amp; improvement</div>
+<p>Every scan writes a full CSV log with all coins and their indicator values. Use it to analyse missed moves and improve your settings over time.</p>
+
+<h3>What is logged</h3>
+<p>22 columns per coin per scan: timestamp, symbol, price, change_24h, signal, confidence, rsi, stoch_rsi, macd_hist, bb_pct, bb_width_pct, vol_ratio, vol_spike, adr_pct, pattern, long_score, short_score, potential, exp_move, trend_1h, alert_fired, safety_blocked, safety_reason.</p>
+
+<div class="info yellow">
+  <strong style="color:var(--yellow)">The most useful columns for analysis:</strong><br><br>
+  • <code>alert_fired</code> — did the alert system fire for this coin?<br>
+  • <code>safety_blocked</code> — was a trade blocked by a safety rule?<br>
+  • <code>safety_reason</code> — exactly which rule blocked it and why
+</div>
+
+<h3>File location</h3>
+<table class="path-table">
+  <thead><tr><th>OS</th><th>Path</th></tr></thead>
+  <tbody>
+    <tr><td>Linux</td><td>~/.config/CryptoScalper/logs/signal_log_YYYY-MM-DD.csv</td></tr>
+    <tr><td>Windows</td><td>%APPDATA%\CryptoScalper\logs\signal_log_YYYY-MM-DD.csv</td></tr>
+    <tr><td>macOS</td><td>~/Library/Application Support/CryptoScalper/logs/signal_log_YYYY-MM-DD.csv</td></tr>
+  </tbody>
+</table>
+
+<p>A new file is created each day. Files older than 7 days are deleted automatically.</p>
+
+<h3>How to open it</h3>
+<p>Config tab → Export Scan Results → <strong>📋 Open Signal Log</strong>. Opens today's file in LibreOffice Calc or Excel. The size label shows current row count and total size of all log files.</p>
+
+<h3>How to use it for improvement</h3>
+<div class="step">
+  <div class="step-num">1</div>
+  <div class="step-body">
+    <div class="step-title">Find a missed move</div>
+    <div class="step-desc">e.g. CFG spiked 13% at 11am — you didn't get an alert</div>
+  </div>
+</div>
+<div class="step">
+  <div class="step-num">2</div>
+  <div class="step-body">
+    <div class="step-title">Open the log and filter by symbol + time</div>
+    <div class="step-desc">Look at CFG rows from 10:00-11:00. What were the RSI, BB%, volume ratio, ADR values?</div>
+  </div>
+</div>
+<div class="step">
+  <div class="step-num">3</div>
+  <div class="step-body">
+    <div class="step-title">Check alert_fired and safety_blocked columns</div>
+    <div class="step-desc">If alert_fired=False — which filter was too strict? If safety_blocked=True — check safety_reason.</div>
+  </div>
+</div>
+<div class="step">
+  <div class="step-num">4</div>
+  <div class="step-body">
+    <div class="step-title">Adjust thresholds accordingly</div>
+    <div class="step-desc">Lower Min ADR%, raise Max RSI, or adjust BB% limit. Save settings and watch future scans.</div>
+  </div>
+</div>
+
+<!-- SCORING -->
+<h2 id="outcome">11b — Outcome Tracking <span class="new-badge">NEW v2.4</span></h2>
+<div class="section-tag orange">Measure what works</div>
+<p>After every alert fires, a background thread checks the actual price at 30 minutes, 1 hour, and 4 hours — then writes the results back to the signal log CSV automatically.</p>
+
+<h3>What gets recorded</h3>
+<table class="score-table">
+  <thead><tr><th>Column</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td>price_30m / pct_30m</td><td>Price and % change 30 minutes after alert</td></tr>
+    <tr><td>price_1h / pct_1h</td><td>Price and % change 1 hour after alert (used for outcome)</td></tr>
+    <tr><td>price_4h / pct_4h</td><td>Price and % change 4 hours after alert</td></tr>
+    <tr><td>outcome</td><td>WIN (≥ +3% in 1h) / LOSS (≤ -2% in 1h) / FLAT (between)</td></tr>
+  </tbody>
+</table>
+
+<h3>Outcome Analysis</h3>
+<p>Config tab → Export Scan Results → <strong>📊 Outcome Analysis</strong></p>
+<div class="info yellow">
+  Shows win rate %, avg 1h move, and per-symbol W/L/F breakdown.<br>
+  After 2 weeks of data you'll know exactly which coins and conditions produce winners.<br>
+  That's when filters get tuned with real evidence — not guesswork.
+</div>
+
+<div class="tip"><div class="tip-icon">⏰</div><div class="tip-body"><strong>Keep the app running daily.</strong> OutcomeTracker needs at least 1-4 hours after an alert fires to record outcomes. Check Outcome Analysis after 2 weeks of data collection.</div></div>
+
+<h2 id="scoring">12 — How Scoring Works</h2>
+<div class="section-tag yellow">The signal engine</div>
+<p>Every coin gets scored independently for LONG and SHORT. The higher-scoring side wins provided it clears a minimum margin. Pure deterministic rules — no machine learning, no black box.</p>
+
+<table class="score-table">
+  <thead><tr><th>Indicator</th><th>LONG points</th><th>SHORT points</th><th>Max</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><strong>RSI</strong></td>
+      <td class="g">&lt;25→+5 · &lt;30→+4 · &lt;35→+3 · &lt;40→+2 · &lt;45→+1</td>
+      <td class="r">&gt;75→+5 · &gt;70→+4 · &gt;65→+3 · &gt;60→+2 · &gt;55→+1</td>
+      <td class="y">±5</td>
+    </tr>
+    <tr>
+      <td><strong>Stoch RSI</strong></td>
+      <td class="g">&lt;20→+2 · &lt;40→+1</td>
+      <td class="r">&gt;80→+2 · &gt;60→+1</td>
+      <td class="y">±2</td>
+    </tr>
+    <tr>
+      <td><strong>MACD</strong></td>
+      <td class="g">Positive + rising→+3 · Positive stale→+1</td>
+      <td class="r">Negative + falling→+3 · Negative stale→+1</td>
+      <td class="y">±3</td>
+    </tr>
+    <tr>
+      <td><strong>Bollinger Band</strong></td>
+      <td class="g">pos&lt;10%→+3 · &lt;25%→+2 · &lt;40%→+1</td>
+      <td class="r">pos&gt;90%→+3 · &gt;75%→+2 · &gt;60%→+1</td>
+      <td class="y">±3</td>
+    </tr>
+    <tr>
+      <td><strong>Pattern</strong></td>
+      <td class="g">Bullish pattern→+2 · Bearish→−1</td>
+      <td class="r">Bearish pattern→+2 · Bullish→−1</td>
+      <td class="y">±2</td>
+    </tr>
+    <tr>
+      <td><strong>24h Momentum</strong></td>
+      <td class="g">24h&lt;−10%→+1 (bounce candidate)</td>
+      <td class="r">24h&gt;15%→+2 · &gt;8%→+1</td>
+      <td class="y">±2</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="info yellow">
+  <strong style="color:var(--yellow)">Signal thresholds:</strong><br><br>
+  <span style="color:var(--green)">STRONG BUY</span> — Long score ≥ 6 AND margin over Short ≥ 3<br>
+  <span style="color:#00cc66">BUY</span> — Long score ≥ 3 AND margin ≥ 2<br>
+  <span style="color:var(--orange)">PRE-BREAKOUT</span> — BB squeeze + volume + RSI 35-55 + price at support (separate logic)<br>
+  <span style="color:var(--red)">STRONG SELL</span> — Short score ≥ 6 AND margin over Long ≥ 3<br>
+  <span style="color:#cc2244">SELL</span> — Short score ≥ 3 AND margin ≥ 2<br>
+  <span style="color:var(--dim)">NEUTRAL</span> — Neither side clears the threshold
+</div>
+
+<!-- WORKFLOW -->
+<h2 id="workflow">13 — Full Workflow Example</h2>
+<div class="section-tag green">End-to-end scalp trade</div>
+
+<div class="step"><div class="step-num">1</div><div class="step-body"><div class="step-title">Configure filters (Config tab)</div><div class="step-desc">Set Max Price $1, Min Volume $1M, SL% 3, TP% 5. Review Trade Safety rules. Hit Apply Settings.</div></div></div>
+<div class="step"><div class="step-num">2</div><div class="step-body"><div class="step-title">Enable auto-scan (Alerts tab)</div><div class="step-desc">Check "Enable auto-scan alerts", set interval 30s, Minimum signal = STRONG BUY, Min ADR = 0.5%. Apply Alert Settings.</div></div></div>
+<div class="step"><div class="step-num">3</div><div class="step-body"><div class="step-title">App scans automatically — WebSocket connects</div><div class="step-desc">After first scan, ⚡ WS turns green in status bar. Prices now update in real-time.</div></div></div>
+<div class="step"><div class="step-num">4</div><div class="step-body"><div class="step-title">Alert fires for STRONG BUY on COS</div><div class="step-desc">Sound plays + desktop notification. Check Top Picks tab — COS appears in LONG CANDIDATES.</div></div></div>
+<div class="step"><div class="step-num">5</div><div class="step-body"><div class="step-title">Safety rules pass (signal held 2 scans, BTC not falling)</div><div class="step-desc">Right-click COS → BUY → dialog opens with pre-filled entry, SL, TP.</div></div></div>
+<div class="step"><div class="step-num">6</div><div class="step-body"><div class="step-title">Confirm trade → BUY executes on Binance</div><div class="step-desc">OCO placed automatically. Trade appears in Trades tab with live P&L updating via WebSocket.</div></div></div>
+<div class="step"><div class="step-num">7</div><div class="step-body"><div class="step-title">TP hit → auto-closes in milliseconds</div><div class="step-desc">WebSocket detects price crossing TP. Market SELL placed, OCO cancelled. Trade shows as WIN.</div></div></div>
+<div class="step"><div class="step-num">8</div><div class="step-body"><div class="step-title">Review signal log for analysis</div><div class="step-desc">Config → Export → 📋 Open Signal Log. Check what the indicators looked like before the move.</div></div></div>
+
+<!-- SHORTCUTS -->
+<h2 id="shortcuts">14 — Keyboard &amp; Mouse Shortcuts</h2>
+
+<div class="shortcuts">
+  <div class="shortcut"><kbd>Double-click row</kbd> <span class="shortcut-desc">Open full detail popup (Scanner tab)</span></div>
+  <div class="shortcut"><kbd>Right-click row (Scanner)</kbd> <span class="shortcut-desc">Context menu: BUY / Details / Binance / TradingView</span></div>
+  <div class="shortcut"><kbd>Right-click row (Trades)</kbd> <span class="shortcut-desc">Context menu: Close / Edit / Delete / Binance / TradingView</span></div>
+  <div class="shortcut"><kbd>Right-click row (Alerts)</kbd> <span class="shortcut-desc">Context menu: BUY / Binance / TradingView — NEW v2.4.2</span></div>
+  <div class="shortcut"><kbd>Click column header</kbd> <span class="shortcut-desc">Sort — click again to reverse</span></div>
+  <div class="shortcut"><kbd>Drag column edge</kbd> <span class="shortcut-desc">Resize column</span></div>
+  <div class="shortcut"><kbd>Click balance label</kbd> <span class="shortcut-desc">Refresh USDT balance from Binance</span></div>
+  <div class="shortcut"><kbd>Click ⚡ WS label</kbd> <span class="shortcut-desc">WebSocket connection status tooltip</span></div>
+  <div class="shortcut"><kbd>Mouse wheel</kbd> <span class="shortcut-desc">Scroll Top Picks cards</span></div>
+</div>
+
+<hr>
+<div class="footer">
+  Crypto Scalp Scanner v2.8.0 &nbsp;·&nbsp; Binance Spot API + WebSocket &nbsp;·&nbsp;
+  Logs: <code>CryptoScalper/logs/</code> &nbsp;·&nbsp;
+  GitHub: <code>github.com/ZAKhan/crypto-scanner</code>
+</div>
+
+</div>
+</body>
+</html>

@@ -36,9 +36,9 @@ REQUIRED_FILES=(
 
 OPTIONAL_FILES=(
     LICENSE
-    CHANGELOG_v2_6_0.html
-    CHANGELOG_v2_7_0.html
-    CHANGELOG_v2_8_0.html
+    docs/CHANGELOG_v2_6_0.html
+    docs/CHANGELOG_v2_7_0.html
+    docs/CHANGELOG_v2_8_0.html
 )
 
 ALL_OK=true
@@ -87,10 +87,11 @@ CORE_FILES=(
 DOC_FILES=(
     README.md
     LICENSE
-    CHANGELOG_v2_6_0.html
-    CHANGELOG_v2_7_0.html
-    CHANGELOG_v2_8_0.html
-    tutorial.html
+    docs/CHANGELOG_v2_6_0.html
+    docs/CHANGELOG_v2_7_0.html
+    docs/CHANGELOG_v2_8_0.html
+    docs/tutorial.html
+    docs/CryptoScalper_SignalLogic_v3.0.0.docx
 )
 
 # ── Ask for version ──────────────────────────────────────────
@@ -142,6 +143,12 @@ if [[ -d "cs" ]]; then
     echo -e "  ${GREEN}+${RESET} cs/  (package)"
 else
     echo -e "  ${RED}✗${RESET} cs/  ← MISSING — package not found"
+fi
+
+# Stage docs/ folder
+if [[ -d "docs" ]]; then
+    git add docs/
+    echo -e "  ${GREEN}+${RESET} docs/  (documentation)"
 fi
 
 echo ""

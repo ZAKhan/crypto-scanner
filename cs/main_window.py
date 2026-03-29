@@ -167,7 +167,6 @@ class CryptoScannerWindow(QMainWindow):
             self._ws_feed.disconnected.connect(self._on_ws_disconnected, Qt.ConnectionType.QueuedConnection)
         else:
             self._ws_feed = None
-        self._alert_engine.scan_started.connect(self._on_alert_scan_started)
         self._build_ui()
         self._setup_timer()
         self._restore_settings()
@@ -788,6 +787,8 @@ class CryptoScannerWindow(QMainWindow):
 
         binance_act = menu.addAction(f"🌐  Open {sym_display} on Binance")
         tv_act      = menu.addAction(f"📈  Open {sym_display} on TradingView")
+        menu.addSeparator()
+        remove_act  = menu.addAction(f"🗑  Remove this alert")
 
         action = menu.exec(self.alert_log_table.viewport().mapToGlobal(pos))
         if action == long_act:
@@ -798,6 +799,8 @@ class CryptoScannerWindow(QMainWindow):
         elif action == tv_act:
             sym_url = sym.replace("_", "") + "USDT"
             open_url(f"https://www.tradingview.com/chart/?symbol=BINANCE:{sym_url}&interval=5")
+        elif action == remove_act:
+            self._remove_alert_row(row)
 
     def _record_trade(self, r, side):
         sym   = r["symbol"].replace("_USDT", "").replace("USDT", "")
@@ -1703,6 +1706,7 @@ class CryptoScannerWindow(QMainWindow):
 
     TRADES_FILE = os.path.join(APP_LOGS_DIR, "trades.json")
     TRADE_LOG   = os.path.join(APP_LOGS_DIR, "trade_log.txt")
+    ALERTS_FILE = os.path.join(APP_LOGS_DIR, "alerts.json")
 
     def _save_trades(self):
         try:
@@ -1746,6 +1750,49 @@ class CryptoScannerWindow(QMainWindow):
             print(f"[WARN] Could not load trades: {e} — starting fresh")
             self._trades = []
 
+    def _save_alerts(self):
+        try:
+            os.makedirs(APP_LOGS_DIR, exist_ok=True)
+            tmp = self.ALERTS_FILE + ".tmp"
+            safe_alerts = []
+            for a in self._alert_log[-50:]:
+                safe = {}
+                for k, v in a.items():
+                    safe[k] = str(v) if not isinstance(v, (str, int, float, bool)) else v
+                safe_alerts.append(safe)
+            with open(tmp, "w") as f:
+                json.dump(safe_alerts, f, indent=2)
+            os.replace(tmp, self.ALERTS_FILE)
+        except Exception as e:
+            print(f"[WARN] Could not save alerts: {e}")
+
+    def _load_alerts(self):
+        try:
+            if not os.path.exists(self.ALERTS_FILE):
+                return
+            with open(self.ALERTS_FILE, "r") as f:
+                data = json.load(f)
+            if not isinstance(data, list):
+                return
+            for alert in data:
+                if not isinstance(alert, dict):
+                    continue
+                for k in ("rsi", "exp", "pot", "vol", "price"):
+                    if k in alert:
+                        try:
+                            alert[k] = float(alert[k])
+                        except Exception:
+                            pass
+                self._alert_log.append(alert)
+                self._add_alert_row(alert, flash=False)
+                # Subscribe symbol to WS so live prices populate
+                if self._ws_feed:
+                    ws_sym = alert.get("symbol", "") + "USDT"
+                    self._ws_feed.subscribe_alert(ws_sym)
+            self._update_history_tab_badge()
+        except Exception as e:
+            print(f"[WARN] Could not load alerts: {e}")
+
     def _on_tab_changed(self, index):
         tab_text = self._tabs_widget.tabText(index)
         if tab_text.startswith("💰"):
@@ -1759,7 +1806,7 @@ class CryptoScannerWindow(QMainWindow):
             return
         if self._ws_feed:
             syms = {t["symbol"] for t in open_trades}
-            self._ws_feed.subscribe(syms | self._ws_feed._subscribed)
+            self._ws_feed.subscribe(syms)
 
         open_syms = list({t["symbol"] for t in open_trades})
         self._trade_price_fetch_running = True
@@ -2115,6 +2162,34 @@ class CryptoScannerWindow(QMainWindow):
             "block BUY alerts on that coin for the cooldown period.\n"
             "Catches post-dump bounce alerts like PHA 11:08.")
 
+        self.al_block_doji = QCheckBox("Block Doji pattern  (indecision candle)")
+        self.al_block_doji.setChecked(ALERT_CFG.get("block_doji", True))
+        self.al_block_doji.setStyleSheet(f"color:{WHITE};")
+        self.al_block_doji.setToolTip(
+            "Skip alerts when the last candle is a Doji.\n"
+            "Doji = open ≈ close = no directional conviction.\n"
+            "49% of noise alerts in log analysis had Doji pattern.")
+
+        self.al_block_neutral_pat = QCheckBox("Block Neutral pattern  (no conviction)")
+        self.al_block_neutral_pat.setChecked(ALERT_CFG.get("block_neutral_pattern", True))
+        self.al_block_neutral_pat.setStyleSheet(f"color:{WHITE};")
+        self.al_block_neutral_pat.setToolTip(
+            "Skip alerts when pattern is Neutral.\n"
+            "31% of noise alerts had Neutral pattern.\n"
+            "Real setups show Hammer, Engulf, Vol Spike, Squeeze, Uptrend.")
+
+        self.al_squeeze_exempt_width = QDoubleSpinBox()
+        self.al_squeeze_exempt_width.setFixedWidth(160)
+        self.al_squeeze_exempt_width.setRange(0.5, 5.0)
+        self.al_squeeze_exempt_width.setDecimals(1)
+        self.al_squeeze_exempt_width.setSingleStep(0.5)
+        self.al_squeeze_exempt_width.setValue(ALERT_CFG.get("squeeze_exempt_bb_width", 2.0))
+        self.al_squeeze_exempt_width.setSuffix("% BB width")
+        self.al_squeeze_exempt_width.setToolTip(
+            "Only exempt exp_move filter when BB width is tighter than this.\n"
+            "Lower = stricter (fewer exemptions). Default 2.0%.\n"
+            "3.0% was too wide — exemption became the main alert path.")
+
         self.al_require_macd = QCheckBox("Require MACD rising")
         self.al_coin_cooldown = QCheckBox("Per-coin cooldown")
         self.al_coin_cooldown.setChecked(ALERT_CFG.get("coin_cooldown", True))
@@ -2168,25 +2243,33 @@ class CryptoScannerWindow(QMainWindow):
         aglay.addWidget(self.al_block_downtrend,    row_offset + 1, 0, 1, 2)
         aglay.addWidget(self.al_block_1h_downtrend, row_offset + 2, 0, 1, 2)
         aglay.addWidget(self.al_require_macd,       row_offset + 3, 0, 1, 2)
+        aglay.addWidget(self.al_block_doji,          row_offset + 4, 0, 1, 2)
+        aglay.addWidget(self.al_block_neutral_pat,   row_offset + 5, 0, 1, 2)
+
+        squeeze_row_lbl = QLabel("BB squeeze exempt width")
+        squeeze_row_lbl.setStyleSheet(f"color:{DIM};")
+        aglay.addWidget(squeeze_row_lbl,             row_offset + 6, 0)
+        aglay.addWidget(self.al_squeeze_exempt_width, row_offset + 6, 1, Qt.AlignmentFlag.AlignLeft)
+
         spike_row = QHBoxLayout()
         spike_row.addWidget(self.al_spike_cooldown)
         spike_row.addWidget(self.al_spike_cooldown_pct)
         spike_row.addStretch()
         spike_w = QWidget(); spike_w.setLayout(spike_row)
-        aglay.addWidget(spike_w,                    row_offset + 4, 0, 1, 2)
+        aglay.addWidget(spike_w,                    row_offset + 7, 0, 1, 2)
         cooldown_row = QHBoxLayout()
         cooldown_row.addWidget(self.al_coin_cooldown)
         cooldown_row.addWidget(self.al_coin_cooldown_mins)
         cooldown_row.addStretch()
         cooldown_w = QWidget(); cooldown_w.setLayout(cooldown_row)
-        aglay.addWidget(cooldown_w,                 row_offset + 5, 0, 1, 2)
+        aglay.addWidget(cooldown_w,                 row_offset + 8, 0, 1, 2)
         crash_row = QHBoxLayout()
         crash_row.addWidget(self.al_crash_cooldown)
         crash_row.addWidget(self.al_crash_cooldown_pct)
         crash_row.addWidget(self.al_crash_cooldown_mins)
         crash_row.addStretch()
         crash_w = QWidget(); crash_w.setLayout(crash_row)
-        aglay.addWidget(crash_w,                    row_offset + 6, 0, 1, 2)
+        aglay.addWidget(crash_w,                    row_offset + 9, 0, 1, 2)
 
         top_row = QHBoxLayout()
         top_row.setSpacing(10)
@@ -2335,9 +2418,29 @@ class CryptoScannerWindow(QMainWindow):
         self.al_history_stats.setStyleSheet(f"color:{DIM}; font-size:11px;")
         history_lay.addWidget(self.al_history_stats)
 
-        self.alert_log_table = QTableWidget(0, 5)
+        # ── P&L summary bar ──────────────────────────────────────────
+        pnl_bar = QHBoxLayout()
+        pnl_bar.setSpacing(18)
+        _pl = QLabel("Total Profit:")
+        _pl.setStyleSheet(f"color:{DIM}; font-size:11px;")
+        self._al_profit_lbl = QLabel("—")
+        self._al_profit_lbl.setStyleSheet(f"color:{GREEN}; font-size:12px; font-weight:700; font-family:{MONO_CSS};")
+        _ll = QLabel("Total Loss:")
+        _ll.setStyleSheet(f"color:{DIM}; font-size:11px;")
+        self._al_loss_lbl = QLabel("—")
+        self._al_loss_lbl.setStyleSheet(f"color:{RED}; font-size:12px; font-weight:700; font-family:{MONO_CSS};")
+        _nl = QLabel("Net:")
+        _nl.setStyleSheet(f"color:{DIM}; font-size:11px;")
+        self._al_net_lbl = QLabel("—")
+        self._al_net_lbl.setStyleSheet(f"font-size:12px; font-weight:700; font-family:{MONO_CSS};")
+        for w in (_pl, self._al_profit_lbl, _ll, self._al_loss_lbl, _nl, self._al_net_lbl):
+            pnl_bar.addWidget(w)
+        pnl_bar.addStretch()
+        history_lay.addLayout(pnl_bar)
+
+        self.alert_log_table = QTableWidget(0, 6)
         self.alert_log_table.setHorizontalHeaderLabels(
-            ["TIME", "SYMBOL", "SIGNAL", "DETAILS", "PRICE"])
+            ["TIME", "SYMBOL", "SIGNAL", "DETAILS", "ENTRY", "LIVE P&L"])
         self.alert_log_table.verticalHeader().setVisible(False)
         self.alert_log_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.alert_log_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -2353,6 +2456,7 @@ class CryptoScannerWindow(QMainWindow):
         al_hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         al_hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         al_hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        al_hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
         al_hdr.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         history_lay.addWidget(self.alert_log_table)
 
@@ -2386,6 +2490,9 @@ class CryptoScannerWindow(QMainWindow):
         ALERT_CFG["crash_pct"]            = self.al_crash_cooldown_pct.value()
         ALERT_CFG["crash_cooldown_mins"]  = self.al_crash_cooldown_mins.value()
         ALERT_CFG["require_macd_rising"]  = self.al_require_macd.isChecked()
+        ALERT_CFG["block_doji"]           = self.al_block_doji.isChecked()
+        ALERT_CFG["block_neutral_pattern"]= self.al_block_neutral_pat.isChecked()
+        ALERT_CFG["squeeze_exempt_bb_width"] = self.al_squeeze_exempt_width.value()
         ALERT_CFG["coin_cooldown"]        = self.al_coin_cooldown.isChecked()
         ALERT_CFG["coin_cooldown_mins"]   = self.al_coin_cooldown_mins.value()
         ALERT_CFG["sound"]            = self.al_sound.isChecked()
@@ -2536,16 +2643,23 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
 
         tbl.setItem(0, 0, cell(alert.get("time", ""), DIM))
         time_item = tbl.item(0, 0)
+        entry_price = alert.get("price", 0)
         time_item.setData(Qt.ItemDataRole.UserRole, {
-            "symbol": alert.get("symbol", ""),
-            "signal": sig,
-            "price":  alert.get("price", 0),
+            "symbol":      alert.get("symbol", ""),
+            "signal":      sig,
+            "price":       entry_price,
+            "entry_price": entry_price,
         })
         tbl.setItem(0, 1, cell(alert.get("symbol", "").replace("USDT",""), ACCENT, bold=True))
         tbl.setItem(0, 2, cell(sig, col, bold=True))
         tbl.setItem(0, 3, cell(detail_text, DIM))
         tbl.setItem(0, 4, cell(price_text, WHITE,
                                align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter))
+        # LIVE P&L — populate immediately if we already have a price
+        sym_ws = alert.get("symbol", "").replace("USDT", "") + "USDT"
+        cur_price = self._live_prices.get(sym_ws)
+        pnl_item = self._make_pnl_item(entry_price, cur_price)
+        tbl.setItem(0, 5, pnl_item)
 
         if is_surge:
             surge_bg = QColor("#2a1f00")
@@ -2560,13 +2674,102 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         if flash and hasattr(self, '_alerts_sub_tabs'):
             self._alerts_sub_tabs.setCurrentIndex(0)
 
+        self._refresh_alert_pnl_summary()
+
+    def _make_pnl_item(self, entry_price, cur_price):
+        """Create a QTableWidgetItem showing live P&L vs entry price."""
+        item = QTableWidgetItem()
+        item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+        item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        try:
+            ep = float(entry_price)
+            cp = float(cur_price) if cur_price is not None else None
+            if cp is None or ep == 0:
+                item.setText("—")
+                item.setForeground(QColor(DIM))
+            else:
+                pnl_pct = (cp - ep) / ep * 100
+                price_str = f"${cp:.5f}" if cp < 1 else f"${cp:.4f}"
+                sign = "+" if pnl_pct >= 0 else ""
+                item.setText(f"{price_str}  {sign}{pnl_pct:.2f}%")
+                if pnl_pct > 0:
+                    item.setForeground(QColor(GREEN))
+                    f = item.font(); f.setBold(True); item.setFont(f)
+                elif pnl_pct < 0:
+                    item.setForeground(QColor(RED))
+                    f = item.font(); f.setBold(True); item.setFont(f)
+                else:
+                    item.setForeground(QColor(WHITE))
+        except Exception:
+            item.setText("—")
+            item.setForeground(QColor(DIM))
+        return item
+
+    def _update_alert_pnl(self):
+        """Refresh the LIVE P&L column for all alert rows."""
+        if not hasattr(self, 'alert_log_table'):
+            return
+        tbl = self.alert_log_table
+        for row in range(tbl.rowCount()):
+            time_item = tbl.item(row, 0)
+            if time_item is None:
+                continue
+            data = time_item.data(Qt.ItemDataRole.UserRole)
+            if not data:
+                continue
+            sym = data.get("symbol", "")
+            entry_price = data.get("entry_price", 0)
+            if not sym or not entry_price:
+                continue
+            ws_sym = sym.replace("USDT", "") + "USDT"
+            cur_price = self._live_prices.get(ws_sym)
+            pnl_item = self._make_pnl_item(entry_price, cur_price)
+            tbl.setItem(row, 5, pnl_item)
+        self._refresh_alert_pnl_summary()
+
+    def _refresh_alert_pnl_summary(self):
+        """Recompute and display Total Profit / Total Loss / Net from all visible alert rows."""
+        if not hasattr(self, 'alert_log_table') or not hasattr(self, '_al_profit_lbl'):
+            return
+        tbl = self.alert_log_table
+        total_profit = 0.0
+        total_loss   = 0.0
+        for row in range(tbl.rowCount()):
+            pnl_item = tbl.item(row, 5)
+            if pnl_item is None:
+                continue
+            txt = pnl_item.text()   # e.g. "$0.19970  +0.55%"
+            # Extract the trailing % value
+            try:
+                pct_part = txt.split()[-1]          # "+0.55%" or "-3.80%"
+                pct = float(pct_part.replace("%", ""))
+                if pct > 0:
+                    total_profit += pct
+                elif pct < 0:
+                    total_loss   += pct             # negative number
+            except Exception:
+                continue
+        net = total_profit + total_loss
+        sign = "+" if net >= 0 else ""
+        net_col = GREEN if net > 0 else (RED if net < 0 else WHITE)
+        self._al_profit_lbl.setText(f"+{total_profit:.2f}%")
+        self._al_loss_lbl.setText(f"{total_loss:.2f}%")
+        self._al_net_lbl.setText(f"{sign}{net:.2f}%")
+        self._al_net_lbl.setStyleSheet(
+            f"color:{net_col}; font-size:12px; font-weight:700; font-family:{MONO_CSS};")
+
     def _on_new_alert(self, alert):
         self._alert_log.append(alert)
-        if len(self._alert_log) > 20:
-            self._alert_log = self._alert_log[-20:]
+        if len(self._alert_log) > 50:
+            self._alert_log = self._alert_log[-50:]
 
         sig = alert["signal"]
         sym = alert["symbol"]
+
+        # Subscribe symbol to WS so live P&L updates flow in
+        if self._ws_feed:
+            ws_sym = sym.replace("USDT", "") + "USDT"
+            self._ws_feed.subscribe_alert(ws_sym)
 
         self._flash_window(sig)
         self._start_title_flash(sig, sym)
@@ -2576,13 +2779,18 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
 
         self._add_alert_row(alert, flash=True)
         self._update_history_tab_badge()
+        self._save_alerts()
 
     def _on_surge_alert(self, alert):
         self._alert_log.append(alert)
-        if len(self._alert_log) > 20:
-            self._alert_log = self._alert_log[-20:]
+        if len(self._alert_log) > 50:
+            self._alert_log = self._alert_log[-50:]
+        if self._ws_feed:
+            ws_sym = alert.get("symbol", "").replace("USDT", "") + "USDT"
+            self._ws_feed.subscribe_alert(ws_sym)
         self._add_alert_row(alert, flash=True)
         self._update_history_tab_badge()
+        self._save_alerts()
         if ALERT_CFG["sound"]:
             self._alert_engine._play_sound("STRONG BUY")
         if ALERT_CFG["desktop"]:
@@ -2610,9 +2818,31 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         for r in self._results:
             if r["symbol"] == symbol:
                 r["price"] = price
+        self._update_alert_pnl_for_symbol(symbol, price)
         if not getattr(self, "_ws_refresh_pending", False):
             self._ws_refresh_pending = True
             QTimer.singleShot(100, self._ws_flush)
+
+    def _update_alert_pnl_for_symbol(self, ws_symbol: str, price: float):
+        """Instantly update P&L for any alert rows matching this WS symbol."""
+        if not hasattr(self, 'alert_log_table'):
+            return
+        tbl = self.alert_log_table
+        for row in range(tbl.rowCount()):
+            time_item = tbl.item(row, 0)
+            if not time_item:
+                continue
+            data = time_item.data(Qt.ItemDataRole.UserRole)
+            if not data:
+                continue
+            sym = data.get("symbol", "")
+            if sym.replace("USDT", "") + "USDT" != ws_symbol:
+                continue
+            entry_price = data.get("entry_price", 0)
+            if not entry_price:
+                continue
+            tbl.setItem(row, 5, self._make_pnl_item(entry_price, price))
+        self._refresh_alert_pnl_summary()
 
     def _ws_flush(self):
         self._ws_refresh_pending = False
@@ -2652,6 +2882,31 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
                 self._ws_feed.subscribe(syms)
                 if not self._ws_feed._running:
                     self._ws_feed.start()
+            # Update _live_prices from scan results (covers alert symbols in the scan set)
+            for r in results:
+                if r.get("price"):
+                    self._live_prices[r["symbol"]] = r["price"]
+
+    def _remove_alert_row(self, row: int):
+        """Remove a single alert row from the table and from _alert_log."""
+        tbl = self.alert_log_table
+        if row < 0 or row >= tbl.rowCount():
+            return
+        # Remove matching entry from _alert_log by time+symbol
+        time_item = tbl.item(row, 0)
+        if time_item:
+            data = time_item.data(Qt.ItemDataRole.UserRole) or {}
+            sym  = data.get("symbol", "")
+            t    = time_item.text()
+            self._alert_log = [
+                a for a in self._alert_log
+                if not (a.get("symbol", "").replace("USDT", "") == sym and
+                        a.get("time", "") == t)
+            ]
+        tbl.removeRow(row)
+        self._update_history_tab_badge()
+        self._refresh_alert_pnl_summary()
+        self._save_alerts()
 
     def _clear_alert_log(self):
         self._alert_log.clear()
@@ -2660,6 +2915,8 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         self._update_history_tab_badge()
         if hasattr(self, 'al_history_stats'):
             self.al_history_stats.setText("No alerts yet — waiting for signals")
+        self._refresh_alert_pnl_summary()
+        self._save_alerts()
 
     def _flash_window(self, signal):
         is_buy    = "BUY" in signal
@@ -2940,6 +3197,28 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
             l = QLabel(lbl); l.setStyleSheet(f"color:{DIM};")
             flay.addWidget(l, i, 0)
             flay.addWidget(widget, i, 1, Qt.AlignmentFlag.AlignLeft)
+
+        # Symbol blocklist — one symbol per line, no USDT suffix needed
+        blocklist_lbl = QLabel("Symbol blocklist")
+        blocklist_lbl.setStyleSheet(f"color:{DIM};")
+        blocklist_lbl.setToolTip("One symbol per line. USDT suffix optional.\nCoins in this list are excluded from all scans and alerts.")
+        from PyQt6.QtWidgets import QPlainTextEdit
+        self.cfg_blocklist = QPlainTextEdit()
+        self.cfg_blocklist.setFixedHeight(90)
+        self.cfg_blocklist.setStyleSheet(
+            f"background:{CARD}; color:{WHITE}; border:1px solid {BORDER}; "
+            f"border-radius:4px; font-family:{MONO_CSS}; font-size:11px; padding:4px;")
+        self.cfg_blocklist.setToolTip(
+            "Symbols to exclude from scanning entirely.\n"
+            "Enter one per line — e.g. USDC, BUSD, WLFI, MBL\n"
+            "USDT suffix is added automatically if missing.\n"
+            "Changes apply on next scan after clicking Apply.")
+        # Populate from CFG
+        current_bl = CFG.get("symbol_blocklist", set())
+        self.cfg_blocklist.setPlainText(
+            "\n".join(sorted(s.replace("USDT", "") for s in current_bl)))
+        flay.addWidget(blocklist_lbl,      len(rows),     0, Qt.AlignmentFlag.AlignTop)
+        flay.addWidget(self.cfg_blocklist, len(rows),     1)
 
         grid2 = QGridLayout()
         grid2.setSpacing(12)
@@ -3487,6 +3766,9 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         CFG["new_listing_filter"]   = self.cfg_new_listing.isChecked()
         CFG["new_listing_min_days"] = self.cfg_new_listing_min.value()
         CFG["new_listing_max_days"] = self.cfg_new_listing_max.value()
+        # Parse blocklist — one symbol per line, USDT suffix optional
+        _bl_lines = [l.strip().upper() for l in self.cfg_blocklist.toPlainText().splitlines() if l.strip()]
+        CFG["symbol_blocklist"] = {(s if s.endswith("USDT") else s + "USDT") for s in _bl_lines}
         CFG["sl_pct"]          = self.cfg_sl.value()
         CFG["tp_pct"]          = self.cfg_tp.value()
         CFG["tp2_pct"]         = self.cfg_tp2.value()
@@ -3560,21 +3842,7 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
             self.sf_daily_loss.setChecked(SAFETY_CFG["daily_loss_limit"])
             self.sf_daily_loss_n.setValue(SAFETY_CFG["daily_loss_amount"])
 
-        try:
-            import json as _json
-            saved_alerts = s.value("alertHistory")
-            if saved_alerts:
-                alerts = _json.loads(saved_alerts)
-                for alert in alerts:
-                    for k in ("rsi", "exp", "pot", "vol", "price"):
-                        if k in alert:
-                            try: alert[k] = float(alert[k])
-                            except: pass
-                    self._alert_log.append(alert)
-                    self._add_alert_row(alert, flash=False)
-                self._update_history_tab_badge()
-        except Exception:
-            pass
+        self._load_alerts()
 
         tk = s.value("tradingApiKey")
         ts = s.value("tradingApiSecret")
@@ -3631,6 +3899,37 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         _load("tpPct",    self.cfg_tp,        float, "tp_pct")
         _load("tp2Pct",   self.cfg_tp2,       float, "tp2_pct")
 
+        # Restore symbol blocklist
+        try:
+            raw_bl = s.value("symbolBlocklist")
+            if raw_bl is not None:
+                lines = [l.strip().upper() for l in str(raw_bl).splitlines() if l.strip()]
+                CFG["symbol_blocklist"] = {(l if l.endswith("USDT") else l + "USDT") for l in lines}
+                self.cfg_blocklist.setPlainText(
+                    "\n".join(sorted(sym.replace("USDT", "") for sym in CFG["symbol_blocklist"])))
+        except Exception:
+            pass
+
+        # Restore new alert filter settings
+        try:
+            v = s.value("alert_block_doji")
+            if v is not None:
+                val = str(v).lower() in ("true", "1")
+                ALERT_CFG["block_doji"] = val
+                self.al_block_doji.setChecked(val)
+            v = s.value("alert_block_neutral_pattern")
+            if v is not None:
+                val = str(v).lower() in ("true", "1")
+                ALERT_CFG["block_neutral_pattern"] = val
+                self.al_block_neutral_pat.setChecked(val)
+            v = s.value("alert_squeeze_exempt_width")
+            if v is not None:
+                val = float(v)
+                ALERT_CFG["squeeze_exempt_bb_width"] = val
+                self.al_squeeze_exempt_width.setValue(val)
+        except Exception:
+            pass
+
         iv = s.value("interval")
         if iv is not None:
             self.cfg_interval.setCurrentText(str(iv))
@@ -3685,6 +3984,9 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
                 self.al_require_macd.setChecked(ALERT_CFG.get("require_macd_rising", False))
                 self.al_coin_cooldown.setChecked(ALERT_CFG.get("coin_cooldown", True))
                 self.al_coin_cooldown_mins.setValue(int(ALERT_CFG.get("coin_cooldown_mins", 30)))
+                self.al_block_doji.setChecked(ALERT_CFG.get("block_doji", True))
+                self.al_block_neutral_pat.setChecked(ALERT_CFG.get("block_neutral_pattern", True))
+                self.al_squeeze_exempt_width.setValue(float(ALERT_CFG.get("squeeze_exempt_bb_width", 2.0)))
             self.al_min_signal.setCurrentText(ALERT_CFG["min_signal"])
             self.al_min_pot.setValue(int(ALERT_CFG["min_potential"]))
             self.al_min_exp.setValue(float(ALERT_CFG["min_exp_move"]))
@@ -3725,23 +4027,20 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
             s.setValue("newListingFilter",   self.cfg_new_listing.isChecked())
             s.setValue("newListingMinDays",  self.cfg_new_listing_min.value())
             s.setValue("newListingMaxDays",  self.cfg_new_listing_max.value())
+            s.setValue("symbolBlocklist",    self.cfg_blocklist.toPlainText())
             s.setValue("slPct",    self.cfg_sl.value())
             s.setValue("tpPct",    self.cfg_tp.value())
             s.setValue("tp2Pct",   self.cfg_tp2.value())
         except Exception:
             pass
+        # Save new alert filter settings
         try:
-            import json as _json
-            alerts_to_save = self._alert_log[-20:]
-            safe_alerts = []
-            for a in alerts_to_save:
-                safe = {}
-                for k, v in a.items():
-                    safe[k] = str(v) if not isinstance(v, (str, int, float, bool)) else v
-                safe_alerts.append(safe)
-            s.setValue("alertHistory", _json.dumps(safe_alerts))
+            s.setValue("alert_block_doji",            self.al_block_doji.isChecked())
+            s.setValue("alert_block_neutral_pattern", self.al_block_neutral_pat.isChecked())
+            s.setValue("alert_squeeze_exempt_width",  self.al_squeeze_exempt_width.value())
         except Exception:
             pass
+        self._save_alerts()
         s.sync()
 
     def _refresh_alert_toggle(self):
@@ -3795,6 +4094,7 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         self._surge_detector.stop()
         self._trades_refresh_timer.stop()
         self._dot_blink_timer.stop()
+        self._alert_pnl_timer.stop()
         _outcome_tracker.stop()
         if self._ws_feed:
             self._ws_feed.stop()
@@ -3805,9 +4105,6 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         self.statusBar().showMessage(msg, timeout_ms)
 
     def _setup_timer(self):
-        self._progress_timer = QTimer()
-        self._progress_timer.timeout.connect(self._poll_progress)
-
         self._trades_refresh_timer = QTimer()
         self._trades_refresh_timer.setInterval(3000)
         self._trades_refresh_timer.timeout.connect(self._fetch_open_trade_prices)
@@ -3816,6 +4113,14 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         self._dot_blink_timer = QTimer()
         self._dot_blink_timer.setInterval(500)
         self._dot_blink_timer.timeout.connect(self._blink_dot)
+
+        # Fallback timer: refreshes alert P&L for any symbols the WS
+        # hasn't ticked yet (e.g. very low-volume coins). WS handles
+        # live updates per-tick; this is a 10s safety net only.
+        self._alert_pnl_timer = QTimer()
+        self._alert_pnl_timer.setInterval(10000)
+        self._alert_pnl_timer.timeout.connect(self._update_alert_pnl)
+        self._alert_pnl_timer.start()
 
     def _blink_dot(self):
         self._dot_blink_state = not self._dot_blink_state
@@ -3854,9 +4159,6 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
             self.progress.setValue(done)
         self.statusBar().showMessage(status[:80])
 
-    def _poll_progress(self):
-        pass
-
     def _on_finished(self, results):
         self._results = results
         self._refresh_display()
@@ -3874,9 +4176,8 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
             daemon=True
         ).start()
         n = len(results)
-        self.statusBar().showMessage(f"Done — {n} coins  [{datetime.now().strftime('%H:%M:%S')}]")
         self._clear_status_alert()
-        self.statusBar().showMessage(f"Scan complete — {n} coins analysed")
+        self.statusBar().showMessage(f"Scan complete — {n} coins analysed  [{datetime.now().strftime('%H:%M:%S')}]")
 
     def _refresh_display(self):
         if self._sort_col is not None and self._results:
@@ -3894,7 +4195,6 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         self.scan_btn.setEnabled(True)
         self.scan_btn.setText("⚡")
         self.progress.setVisible(False)
-        self.statusBar().showMessage(f"Error: {msg[:60]}")
         self.statusBar().showMessage(f"Error: {msg}")
 
     _SORT_KEY = {

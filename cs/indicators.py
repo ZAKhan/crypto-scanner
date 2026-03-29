@@ -39,7 +39,6 @@ def calc_macd(closes, fast=12, slow=26, sig=9):
     sl = ema(ml, sig)
     if not sl:
         return ml[-1], 0.0, ml[-1], [ml[-1]]
-    # Build last 3 histogram values to detect rising/falling momentum
     offset = len(ml) - len(sl)
     hist_series = [round(ml[i] - sl[i - offset], 8)
                    for i in range(max(offset, len(ml) - 3), len(ml))]
@@ -50,21 +49,52 @@ def calc_bollinger(closes, period=20, mult=2.0):
     if len(closes) < period:
         return None, None, None
     win = closes[-period:]
-    mid = sum(win) / period
+    mid = statistics.mean(win)
     std = statistics.stdev(win)
     return round(mid + mult * std, 6), round(mid, 6), round(mid - mult * std, 6)
 
 def calc_stoch_rsi(closes, period=14):
-    if len(closes) < period * 2:
+    """
+    Efficient StochRSI: compute RSI once with the Wilder smoothing already
+    embedded in calc_rsi, then slide a window over the RSI series.
+    O(n) instead of the previous O(n²) per-candle recalculation.
+    """
+    needed = period * 2 + 1
+    if len(closes) < needed:
         return 50.0
-    rsi_vals = [calc_rsi(closes[:i+1], period) for i in range(period, len(closes))]
+
+    # Build RSI series incrementally using the same Wilder smoothing as calc_rsi.
+    # Start the first smoothed ag/al from the first `period` differences.
+    gains, losses = [], []
+    for i in range(1, len(closes)):
+        d = closes[i] - closes[i - 1]
+        gains.append(max(d, 0.0))
+        losses.append(max(-d, 0.0))
+
+    ag = sum(gains[:period]) / period
+    al = sum(losses[:period]) / period
+    rsi_vals = []
+    # First RSI value uses the initial smoothed averages
+    if al == 0:
+        rsi_vals.append(100.0)
+    else:
+        rsi_vals.append(round(100 - 100 / (1 + ag / al), 2))
+
+    for i in range(period, len(gains)):
+        ag = (ag * (period - 1) + gains[i]) / period
+        al = (al * (period - 1) + losses[i]) / period
+        if al == 0:
+            rsi_vals.append(100.0)
+        else:
+            rsi_vals.append(round(100 - 100 / (1 + ag / al), 2))
+
     if len(rsi_vals) < period:
         return 50.0
     win = rsi_vals[-period:]
     lo, hi = min(win), max(win)
     if hi == lo:
         return 50.0
-    return round((rsi_vals[-1] - lo) / (hi - lo) * 100, 2) if (hi - lo) > 0 else 50.0
+    return round((rsi_vals[-1] - lo) / (hi - lo) * 100, 2)
 
 def detect_pattern(candles):
     if len(candles) < 5:
@@ -126,9 +156,6 @@ def score_signal(rsi, macd_h, price, bb_upper, bb_lower, bb_mid, pattern,
                  change_24h=0.0, stoch_rsi=50.0,
                  vol_ratio=1.0, macd_rising=False, bb_width_pct=0.0,
                  trend_1h="flat"):
-    """
-    Confluence scoring — quality over quantity.
-    """
     long_score  = 0
     short_score = 0
 
@@ -145,12 +172,12 @@ def score_signal(rsi, macd_h, price, bb_upper, bb_lower, bb_mid, pattern,
     elif rsi > 55:  short_score += 1
 
     # ── Stochastic RSI ──────────────────────────────────
-    if stoch_rsi < 20:  long_score  += 2
-    elif stoch_rsi < 40: long_score += 1
-    if stoch_rsi > 80:  short_score += 2
-    elif stoch_rsi > 60: short_score+= 1
+    if stoch_rsi < 20:   long_score  += 2
+    elif stoch_rsi < 40: long_score  += 1
+    if stoch_rsi > 80:   short_score += 2
+    elif stoch_rsi > 60: short_score += 1
 
-    # ── MACD — weight by freshness ─
+    # ── MACD ───────────────────────────────────────────
     if macd_h > 0:
         long_score  += 3 if macd_rising else 1
     elif macd_h < 0:
@@ -160,14 +187,12 @@ def score_signal(rsi, macd_h, price, bb_upper, bb_lower, bb_mid, pattern,
     if bb_lower and bb_upper and bb_upper > bb_lower:
         pos = (price - bb_lower) / (bb_upper - bb_lower)
         bb_mult = 0.5 if bb_width_pct > 12 else 1.0
-
-        if pos < 0.10:    long_score  += int(3 * bb_mult)
-        elif pos < 0.25:  long_score  += int(2 * bb_mult)
-        elif pos < 0.40:  long_score  += int(1 * bb_mult)
-
-        if pos > 0.90:    short_score += int(3 * bb_mult)
-        elif pos > 0.75:  short_score += int(2 * bb_mult)
-        elif pos > 0.60:  short_score += int(1 * bb_mult)
+        if pos < 0.10:   long_score  += int(3 * bb_mult)
+        elif pos < 0.25: long_score  += int(2 * bb_mult)
+        elif pos < 0.40: long_score  += int(1 * bb_mult)
+        if pos > 0.90:   short_score += int(3 * bb_mult)
+        elif pos > 0.75: short_score += int(2 * bb_mult)
+        elif pos > 0.60: short_score += int(1 * bb_mult)
 
     # ── Candlestick pattern ─────────────────────────────
     BULLISH = ["Hammer", "Bullish Engulf", "Vol Spike ↑", "Uptrend"]
@@ -191,18 +216,15 @@ def score_signal(rsi, macd_h, price, bb_upper, bb_lower, bb_mid, pattern,
     elif change_24h > 8:   short_score += 1
     elif change_24h < -10: long_score  += 1
 
-    # ── 1h trend alignment ────────────────────
+    # ── 1h trend alignment ──────────────────────────────
     if trend_1h == "up":
         long_score  += 1
     elif trend_1h == "down":
         long_score  -= 2
         short_score += 1
 
-    # ── Clip negatives ──────────────────────────────────
     long_score  = max(0, long_score)
     short_score = max(0, short_score)
-
-    # ── Determine signal with margin check ──────────────
     margin = abs(long_score - short_score)
 
     if long_score > short_score:
@@ -218,14 +240,10 @@ def score_signal(rsi, macd_h, price, bb_upper, bb_lower, bb_mid, pattern,
 
 
 def profit_potential(r):
-    """
-    Score 0-100 indicating how much immediate profit potential this coin has.
-    """
     score = 0
     sig = r["signal"]
-
-    if "STRONG" in sig:  score += 30
-    elif "BUY" in sig or "SELL" in sig: score += 15
+    if "STRONG" in sig:                         score += 30
+    elif "BUY" in sig or "SELL" in sig:         score += 15
 
     vr = r.get("vol_ratio", 1)
     if vr > 3:    score += 25
@@ -237,20 +255,18 @@ def profit_potential(r):
     price = r["price"]
     if bbu and bbl and bbu != bbl:
         pos = (price - bbl) / (bbu - bbl)
-        if "BUY" in sig:
-            score += int((1 - pos) * 20)
-        else:
-            score += int(pos * 20)
+        if "BUY" in sig: score += int((1 - pos) * 20)
+        else:            score += int(pos * 20)
 
     rsi = r["rsi"]
     if "BUY" in sig:
-        if rsi < 25:    score += 15
-        elif rsi < 35:  score += 10
-        elif rsi < 45:  score += 5
+        if rsi < 25:   score += 15
+        elif rsi < 35: score += 10
+        elif rsi < 45: score += 5
     else:
-        if rsi > 75:    score += 15
-        elif rsi > 65:  score += 10
-        elif rsi > 55:  score += 5
+        if rsi > 75:   score += 15
+        elif rsi > 65: score += 10
+        elif rsi > 55: score += 5
 
     mh = r.get("macd_hist", 0)
     if ("BUY" in sig and mh > 0) or ("SELL" in sig and mh < 0):
@@ -264,28 +280,19 @@ def profit_potential(r):
 
 
 def calc_expected_move(candles, signal):
-    """
-    Estimate expected % move based on ATR, BB width, and recent momentum.
-    Returns expected move as a percentage of current price.
-    """
     if len(candles) < 15:
         return 0.0
-
     closes = [c["close"] for c in candles]
     price  = closes[-1]
 
-    # ATR
-    trs = []
-    for i in range(1, len(candles)):
-        high  = candles[i]["high"]
-        low   = candles[i]["low"]
-        prev_c= candles[i-1]["close"]
-        tr    = max(high - low, abs(high - prev_c), abs(low - prev_c))
-        trs.append(tr)
-    atr14 = statistics.mean(trs[-14:])
-    atr_pct = (atr14 / price) * 100
+    trs = [
+        max(candles[i]["high"] - candles[i]["low"],
+            abs(candles[i]["high"] - candles[i-1]["close"]),
+            abs(candles[i]["low"]  - candles[i-1]["close"]))
+        for i in range(1, len(candles))
+    ]
+    atr_pct = statistics.mean(trs[-14:]) / price * 100
 
-    # BB width as % of price
     bb_width_pct = 0.0
     if len(closes) >= 20:
         win = closes[-20:]
@@ -293,17 +300,13 @@ def calc_expected_move(candles, signal):
         std = statistics.stdev(win)
         bb_width_pct = (std * 4 / price) * 100
 
-    # Momentum: avg candle body size over last 5 candles as % of price
-    bodies = [abs(c["close"] - c["open"]) for c in candles[-5:]]
-    momentum_pct = (statistics.mean(bodies) / price) * 100
+    momentum_pct = statistics.mean(
+        [abs(c["close"] - c["open"]) for c in candles[-5:]]
+    ) / price * 100
 
-    expected = (atr_pct * 0.5) + (bb_width_pct * 0.3) + (momentum_pct * 0.2)
-
-    if "STRONG" in signal:
-        expected *= 1.4
-    elif "BUY" in signal or "SELL" in signal:
-        expected *= 1.1
-
+    expected = atr_pct * 0.5 + bb_width_pct * 0.3 + momentum_pct * 0.2
+    if "STRONG" in signal:       expected *= 1.4
+    elif "BUY" in signal or "SELL" in signal: expected *= 1.1
     return round(expected, 2)
 
 
@@ -315,6 +318,7 @@ def analyse(symbol, raw_klines, change_24h=0.0, trend_1h="flat"):
     highs  = [c["high"]  for c in candles]
     lows   = [c["low"]   for c in candles]
     vols   = [c["vol"]   for c in candles]
+
     rsi              = calc_rsi(closes, CFG["rsi_period"])
     stoch_rsi        = calc_stoch_rsi(closes, CFG["rsi_period"])
     macd, msig, mh, macd_hist_series = calc_macd(closes)
@@ -323,9 +327,8 @@ def analyse(symbol, raw_klines, change_24h=0.0, trend_1h="flat"):
     avg_vol          = statistics.mean(vols)
     vol_ratio        = vols[-1] / avg_vol if avg_vol else 0
 
-    macd_rising = False
-    if len(macd_hist_series) >= 2:
-        macd_rising = macd_hist_series[-1] > macd_hist_series[-2]
+    macd_rising = (len(macd_hist_series) >= 2 and
+                   macd_hist_series[-1] > macd_hist_series[-2])
 
     bb_width_pct = 0.0
     if bbu and bbl and closes[-1] > 0:
@@ -333,9 +336,8 @@ def analyse(symbol, raw_klines, change_24h=0.0, trend_1h="flat"):
 
     adr_pct = 0.0
     if len(candles) >= 5 and closes[-1] > 0:
-        recent = candles[-10:]
         ranges = [(c["high"] - c["low"]) / c["close"] * 100
-                  for c in recent if c["close"] > 0]
+                  for c in candles[-10:] if c["close"] > 0]
         adr_pct = round(statistics.mean(ranges), 2) if ranges else 0.0
 
     signal, sig_clr, long_sc, short_sc = score_signal(
@@ -347,14 +349,33 @@ def analyse(symbol, raw_klines, change_24h=0.0, trend_1h="flat"):
     pre_breakout = False
     if signal in ("NEUTRAL", "BUY") and bbu and bbl and closes[-1] > 0:
         bb_pct_pos    = (closes[-1] - bbl) / (bbu - bbl) * 100 if (bbu - bbl) > 0 else 50
-        recent_high   = max(highs[-15:])
-        at_resistance = closes[-1] >= recent_high * 0.99
+        at_resistance = closes[-1] >= max(highs[-15:]) * 0.99
+
+        # Detect higher-lows accumulation: last 3 swing lows rising
+        swing_lows = [
+            lows[i] for i in range(2, len(lows) - 1)
+            if lows[i] < lows[i-1] and lows[i] < lows[i+1]
+        ]
+        higher_lows = (len(swing_lows) >= 3 and
+                       swing_lows[-1] > swing_lows[-2] > swing_lows[-3])
+
+        # Tight squeeze (BB width < 3%): lower vol threshold to 1.2 — slow
+        # accumulation breakouts build quietly before the volume spike arrives.
+        # STO-style setups: 30+ candle grind with higher lows, thin volume,
+        # then explosion. We want to catch the coil, not wait for the pop.
+        tight_squeeze  = bb_width_pct < 3.0
+        vol_threshold  = 1.2 if tight_squeeze else 1.5
+        # Widen RSI ceiling to 60 for tight squeezes — accumulation can push
+        # RSI up gradually as buyers absorb supply before the breakout candle
+        rsi_ceiling    = 60 if tight_squeeze else 55
+
         pre_breakout = (
             1.5 <= bb_width_pct < 5.0 and
-            vol_ratio >= 1.5 and
-            35 <= rsi <= 55 and
-            bb_pct_pos < 25 and
-            not at_resistance
+            vol_ratio >= vol_threshold and
+            35 <= rsi <= rsi_ceiling and
+            bb_pct_pos < 30 and          # slight widening: 25→30 to catch mid-range coils
+            not at_resistance and
+            (not tight_squeeze or higher_lows or trend_1h in ("up", "flat"))
         )
         if pre_breakout:
             signal  = "PRE-BREAKOUT"
@@ -394,32 +415,20 @@ def analyse(symbol, raw_klines, change_24h=0.0, trend_1h="flat"):
 def market_context(candles: list[dict]) -> dict:
     """
     Analyses the broader price structure of the last 25+ candles.
-    Returns a context dict used to gate signals — blocking entries
-    into dead-cats, lower-high downtrends, and post-dump bounces.
-
-    Keys returned:
-      trend          : "up" | "down" | "neutral"
-      lower_highs    : bool   — 3 consecutive swing highs declining
-      lower_lows     : bool   — 2 consecutive swing lows declining
-      dump_nearby    : bool   — big red candle (body >0.5%, vol >2x avg) in last 10 bars
-      dump_vol_ratio : float  — volume multiple of the dump candle vs average
-      bounce_vol_weak: bool   — bounce vol < 60% of the dump candle vol
-      vol_trend      : "buying" | "selling" | "neutral" — last 5 bars
-      structure_score: int    — composite -3 to +3; negative = bearish structure
-      block_reason   : str    — human-readable explanation if blocked
+    Returns a context dict used to gate signals.
     """
-    import statistics as _st
-
     ctx = {
         "trend": "neutral", "lower_highs": False, "lower_lows": False,
         "dump_nearby": False, "dump_vol_ratio": 0.0,
         "bounce_vol_weak": True, "vol_trend": "neutral",
+        "sustained_bleed": False,
         "structure_score": 0, "block_reason": "",
     }
     if len(candles) < 25:
         return ctx
 
     closes = [c["close"] for c in candles]
+    vols   = [c["vol"]   for c in candles]
 
     # 1. EMA-50 slope as trend proxy
     ema_vals = ema(closes, 50)
@@ -430,7 +439,7 @@ def market_context(candles: list[dict]) -> dict:
         elif slope < -0.3:
             ctx["trend"] = "down"; ctx["structure_score"] -= 1
 
-    # 2. Lower highs — last 3 swing highs declining
+    # 2. Lower highs
     swing_highs = [
         candles[i]["high"] for i in range(2, len(candles) - 1)
         if candles[i]["high"] > candles[i-1]["high"]
@@ -450,9 +459,33 @@ def market_context(candles: list[dict]) -> dict:
         ctx["lower_lows"] = True
         ctx["structure_score"] -= 1
 
-    # 4. Dump detector — big red candle with heavy volume in last 10 bars
-    vols    = [c["vol"] for c in candles]
-    vol_avg = _st.mean(vols) if vols else 1
+    # 4. Sustained bleed detector — catches slow multi-hour downtrends
+    # that don't produce clear swing-high structures (like RESOLV).
+    # Uses EMA-10 as a fast trend proxy over the last 20 candles:
+    #   - EMA-10 must be falling (slope < 0)
+    #   - Majority of last 15 closes must be below EMA-10
+    #   - Total range of last 20 closes must show a net decline
+    # All three conditions together = coin is bleeding, not consolidating.
+    if len(closes) >= 20:
+        ema10 = ema(closes, 10)
+        if len(ema10) >= 10:
+            # EMA-10 slope over last 10 values
+            e10_slope = (ema10[-1] - ema10[-10]) / ema10[-10] * 100 if ema10[-10] > 0 else 0
+            # How many of last 15 closes are below their corresponding EMA-10 value
+            offset = len(closes) - len(ema10)
+            below_ema = sum(
+                1 for i in range(max(0, len(ema10) - 15), len(ema10))
+                if closes[i + offset] < ema10[i]
+            )
+            # Net price change over last 20 candles
+            net_chg = (closes[-1] - closes[-20]) / closes[-20] * 100 if closes[-20] > 0 else 0
+
+            if e10_slope < -0.2 and below_ema >= 10 and net_chg < -2.0:
+                ctx["sustained_bleed"] = True
+                ctx["structure_score"] -= 2
+
+    # 5. Dump detector
+    vol_avg = statistics.mean(vols) if vols else 1
     for c in candles[-10:]:
         is_red    = c["close"] < c["open"]
         body_pct  = abs(c["close"] - c["open"]) / c["open"] * 100
@@ -463,16 +496,16 @@ def market_context(candles: list[dict]) -> dict:
             ctx["structure_score"] -= 1
             break
 
-    # 5. Bounce quality — compare last 3 candle avg vol vs dump candle
+    # 6. Bounce quality
     if ctx["dump_nearby"]:
-        bounce_ratio = _st.mean(vols[-3:]) / vol_avg if vol_avg > 0 else 1
+        bounce_ratio = statistics.mean(vols[-3:]) / vol_avg if vol_avg > 0 else 1
         if bounce_ratio >= ctx["dump_vol_ratio"] * 0.6:
             ctx["bounce_vol_weak"] = False
             ctx["structure_score"] += 1
         else:
             ctx["structure_score"] -= 1
 
-    # 6. Volume character — last 5 bars buy vs sell pressure
+    # 7. Volume character
     last5    = candles[-5:]
     buy_vol  = sum(c["vol"] for c in last5 if c["close"] >= c["open"])
     sell_vol = sum(c["vol"] for c in last5 if c["close"] <  c["open"])
@@ -484,12 +517,13 @@ def market_context(candles: list[dict]) -> dict:
         elif bp < 0.35:
             ctx["vol_trend"] = "selling"; ctx["structure_score"] -= 1
 
-    # Build block reason string
     reasons = []
     if ctx["lower_highs"]:                            reasons.append("lower-highs")
+    if ctx["sustained_bleed"]:                        reasons.append("sustained bleed")
     if ctx["dump_nearby"] and ctx["bounce_vol_weak"]: reasons.append("dead-cat risk")
     if ctx["trend"] == "down":                        reasons.append("downtrend")
     if ctx["lower_lows"]:                             reasons.append("lower-lows")
     if ctx["vol_trend"] == "selling":                 reasons.append("sell pressure")
     ctx["block_reason"] = " | ".join(reasons)
+
     return ctx

@@ -6,34 +6,38 @@ from cs.safety import check_trade_safety, safety_mark_symbol_blocked
 
 ALERT_CFG = {
     "enabled":          True,
-    "interval_sec":     60,         # auto-scan interval
-    "min_signal":       "BUY",      # minimum: BUY | STRONG BUY
+    "interval_sec":     60,
+    "min_signal":       "STRONG BUY",  # raised BUY → STRONG BUY
     "sound":            True,
     "desktop":          True,
     "telegram":         False,
     "tg_token":         "",
     "tg_chat_id":       "",
-    "whatsapp":         False,      # PicoClaw WhatsApp channel
-    "wa_number":        "",         # recipient: country code + number, e.g. 923001234567
+    "whatsapp":         False,
+    "wa_number":        "",
     "picoclaw_queue":   os.path.expanduser("~/.picoclaw/workspace/crypto_alerts.json"),
-    "min_potential":    40,         # only alert if Pot% >= this
-    "min_exp_move":     2.0,        # only alert if Exp% >= this (lowered from 3.0)
-    "squeeze_exempt_bb_width": 3.0, # exempt exp/vol filters when BB squeezed this tight
-    "max_rsi":          70,         # only alert if RSI <= this
-    "max_bb_pct":       80,         # only alert if BB% <= this (0=oversold, 100=overbought)
-    "require_vol_spike": False,     # only alert if volume spike detected
-    "min_adr_pct":      0.5,        # minimum avg candle range % — skip flat coins
-    "block_downtrend":  True,       # Fix 1 — block alerts when pattern shows Downtrend
-    "block_1h_downtrend": True,     # v2.4.5 — block BUY alerts when 1h trend is down
-    "min_vol_ratio":    0.8,        # Fix 2 — minimum volume ratio vs average
-    "spike_cooldown":   True,       # Fix 3 — skip coin if spiked >15% in last 3 hours
-    "crash_cooldown":   True,       # v2.4.5 — skip BUY if single candle dropped >8% recently
-    "crash_pct":        8.0,        # v2.4.5 — single candle drop % threshold
-    "crash_cooldown_mins": 60,      # v2.4.5 — cooldown duration in minutes after crash candle
-    "spike_pct":        15.0,       # Fix 3 — spike threshold %
-    "require_macd_rising": False,   # Fix 4 — only alert if MACD is rising
-    "coin_cooldown":       True,    # Fix 5 — per-coin alert cooldown
-    "coin_cooldown_mins":  30,      # minutes before same coin can alert again
+    "min_potential":    50,         # raised 40 → 50
+    "min_exp_move":     2.0,        # kept at 2.0 — vol gate is the real filter
+    "squeeze_exempt_bb_width": 2.0, # tightened 3.0 → 2.0
+    "max_rsi":          65,         # lowered 70 → 65
+    "max_bb_pct":       70,         # lowered 80 → 70
+    "require_vol_spike": False,
+    "min_adr_pct":      0.8,        # raised 0.5 → 0.8: coin must have real daily range
+    "block_downtrend":  True,
+    "block_doji":       True,       # NEW: Doji = indecision, block it
+    "block_neutral_pattern": True,  # NEW: Neutral pattern = no conviction, block it
+    "block_1h_downtrend": True,
+    "min_vol_ratio":    1.0,        # raised 0.8 → 1.0: volume must be at least average
+    "spike_cooldown":   True,
+    "crash_cooldown":   True,
+    "crash_pct":        8.0,
+    "crash_cooldown_mins": 60,
+    "crash_cumulative_pct": 6.0,
+    "crash_cumulative_candles": 10,
+    "spike_pct":        15.0,
+    "require_macd_rising": True,    # raised False → True: MACD histogram must be positive
+    "coin_cooldown":       True,
+    "coin_cooldown_mins":  60,
 }
 
 
@@ -118,25 +122,42 @@ def log_scan_results(results, alert_cfg=None, safety_cfg=None, trades=None):
                 # Would this have fired an alert?
                 level = sig_order.get(sig, 5)
                 _bb_w  = r.get("bb_width_pct", 99)
+                _pat   = r.get("pattern", "")
                 _sqex  = ("BUY" in sig and
-                          _bb_w < ALERT_CFG.get("squeeze_exempt_bb_width", 3.0) and
-                          r.get("trend_1h") in ("up", "flat"))
+                          _bb_w < ALERT_CFG.get("squeeze_exempt_bb_width", 2.0) and
+                          r.get("trend_1h") in ("up", "flat") and
+                          r.get("vol_ratio", 0) >= 1.0)
+                _pat_ok = (
+                    not (ALERT_CFG.get("block_doji", True) and "Doji" in _pat) and
+                    not (ALERT_CFG.get("block_neutral_pattern", True) and _pat == "Neutral")
+                )
                 alert_fired = (
                     level <= min_level and
                     pot  >= ALERT_CFG.get("min_potential", 0) and
                     (exp >= ALERT_CFG.get("min_exp_move", 0) or _sqex) and
                     rsi  <= ALERT_CFG.get("max_rsi", 100) and
                     bb_pct_raw <= ALERT_CFG.get("max_bb_pct", 200) and
-                    (r.get("vol_ratio", 0) >= ALERT_CFG.get("min_vol_ratio", 0) or _sqex) and
-                    (not ALERT_CFG.get("block_downtrend") or not any(p in r.get("pattern", "") for p in ("Downtrend", "Rejection"))) and
+                    r.get("vol_ratio", 0) >= ALERT_CFG.get("min_vol_ratio", 1.0) and
+                    _pat_ok and
+                    (not ALERT_CFG.get("block_downtrend") or not any(p in _pat for p in ("Downtrend", "Rejection"))) and
                     (not ALERT_CFG.get("require_macd_rising") or r.get("macd_rising", False)) and
                     (not ALERT_CFG.get("require_vol_spike") or r.get("vol_spike", False)) and
                     (not ALERT_CFG.get("block_1h_downtrend", True) or
                      not ("BUY" in sig and r.get("trend_1h") == "down")) and
                     (not ALERT_CFG.get("crash_cooldown", True) or
-                     not ("BUY" in sig and any(
-                         (c["open"] - c["close"]) / c["open"] * 100 >= ALERT_CFG.get("crash_pct", 8.0)
-                         for c in r.get("candles", [])[-3:] if c["open"] > 0)))
+                     not ("BUY" in sig and (
+                         any(
+                             (c["open"] - c["close"]) / c["open"] * 100 >= ALERT_CFG.get("crash_pct", 8.0)
+                             for c in r.get("candles", [])[-3:] if c["open"] > 0
+                         ) or (
+                             len(r.get("candles", [])) >= ALERT_CFG.get("crash_cumulative_candles", 10) and
+                             (lambda w: (max(c["high"] for c in w) - r["candles"][-1]["close"])
+                              / max(c["high"] for c in w) * 100
+                              >= ALERT_CFG.get("crash_cumulative_pct", 6.0)
+                              if max(c["high"] for c in w) > 0 else False
+                             )(r["candles"][-ALERT_CFG.get("crash_cumulative_candles", 10):])
+                         )
+                     )))
                 )
 
                 # Would safety have blocked it?

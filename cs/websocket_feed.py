@@ -18,6 +18,14 @@ class BinanceWebSocketPrices(QObject):
     Maintains a persistent WebSocket connection to Binance.
     Emits price_update(symbol, price) signal on every tick.
     Auto-reconnects on disconnect.
+
+    Two subscription tiers:
+    - Trade symbols (_trade_syms): open positions — get a dedicated per-symbol
+      miniTicker stream that fires on every trade execution (~real-time).
+      Adding new trade symbols triggers a reconnect to build the new URL.
+    - Alert symbols (_alert_syms): alert log entries — covered by the all-market
+      !miniTicker@arr stream that fires every ~1s. No reconnect needed; prices
+      arrive within 1s automatically for every symbol on Binance.
     """
     price_update = pyqtSignal(str, float)   # symbol, price
     connected    = pyqtSignal()
@@ -25,29 +33,27 @@ class BinanceWebSocketPrices(QObject):
 
     def __init__(self):
         super().__init__()
-        self._subscribed  = set()   # symbols currently subscribed
+        self._trade_syms  = set()   # open-position symbols → per-symbol streams
+        self._alert_syms  = set()   # alert symbols → covered by all-market stream
         self._ws          = None
         self._thread      = None
         self._running     = False
-        self._reconnect_delay = 3   # seconds before reconnect
+        self._reconnect_delay = 3
 
-    def _ws_url(self, trade_syms=None):
+    def _ws_url(self):
         """
-        Build WebSocket URL:
-        - Open trade symbols: individual ticker streams (updates on every tick)
-        - Scanner symbols: all-market miniTicker (every 3s, sufficient for scanning)
+        Build combined WebSocket URL.
+        - Per-symbol @miniTicker for every open-trade symbol (fires on every fill).
+        - !miniTicker@arr for the all-market snapshot (every ~1s, covers alert syms).
         """
-        trade_syms = trade_syms or set()
         base_testnet = "wss://stream.testnet.binance.vision/stream?streams="
         base_live    = "wss://stream.binance.com:9443/stream?streams="
         base = base_testnet if TRADING_CFG["testnet"] else base_live
 
         streams = []
-        # Per-symbol miniTicker for open trades — fires on every trade
-        for sym in trade_syms:
+        for sym in sorted(self._trade_syms):
             streams.append(f"{sym.lower()}@miniTicker")
-        # All-market snapshot for scanner — covers everything else
-        streams.append("!miniTicker@arr@3000ms")
+        streams.append("!miniTicker@arr@1000ms")   # 1 s cadence — sufficient for alert P&L
 
         return base + "/".join(streams)
 
@@ -67,15 +73,28 @@ class BinanceWebSocketPrices(QObject):
                 pass
 
     def subscribe(self, symbols: set):
-        """Update subscriptions. Reconnects if trade symbols changed (need per-symbol streams)."""
+        """
+        Subscribe open-trade symbols.
+        Triggers a WS reconnect when the set changes so new per-symbol
+        streams are included in the URL.
+        """
         new_syms = {s.upper() for s in symbols}
-        if new_syms == self._subscribed:
+        if new_syms == self._trade_syms:
             return
-        old_trade = {s for s in self._subscribed if not s.startswith("!")}
-        new_trade = {s for s in new_syms if not s.startswith("!")}
-        self._subscribed = new_syms
-        # Reconnect only if trade symbols changed — need new per-symbol streams
-        if old_trade != new_trade and self._ws:
+        self._trade_syms = new_syms
+        self._reconnect()
+
+    def subscribe_alert(self, symbol: str):
+        """
+        Subscribe an alert symbol.
+        No reconnect required — the all-market stream already covers it.
+        Prices will arrive within ~1s automatically.
+        """
+        self._alert_syms.add(symbol.upper())
+
+    def _reconnect(self):
+        """Close current WS so _run() rebuilds the URL and reconnects."""
+        if self._ws:
             try:
                 self._ws.close()
             except Exception:
@@ -84,11 +103,7 @@ class BinanceWebSocketPrices(QObject):
     def _run(self):
         while self._running:
             try:
-                # Build trade symbol list (only open trade symbols, not scanner symbols)
-                trade_syms = {s for s in self._subscribed}
-                url = self._ws_url(trade_syms)
-
-                # Use a local reference to self for closure
+                url = self._ws_url()
                 _self = self
 
                 def on_message(ws, msg):
@@ -96,14 +111,15 @@ class BinanceWebSocketPrices(QObject):
                         data = json.loads(msg)
                         tickers = data.get("data", data)
                         if isinstance(tickers, list):
-                            # All-market miniTicker array
+                            # All-market miniTicker array — emit for ALL symbols.
+                            # This is what feeds live P&L for alert rows.
                             for d in tickers:
                                 sym   = d.get("s", "")
                                 price = float(d.get("c", 0) or 0)
-                                if price > 0 and (_self._subscribed and sym in _self._subscribed):
+                                if sym and price > 0:
                                     _self.price_update.emit(sym, price)
                         elif isinstance(tickers, dict):
-                            # Individual symbol stream — emit regardless of filter
+                            # Individual per-symbol stream for open trades
                             sym   = tickers.get("s", "")
                             price = float(tickers.get("c", 0) or 0)
                             if sym and price > 0:
