@@ -40,7 +40,7 @@ from cs.safety import (
 )
 from cs.logger import ALERT_CFG, _get_signal_log_path, SIGNAL_LOG_PATH, log_scan_results
 from cs.alerts import AlertEngine, _outcome_tracker
-from cs.surge import VolumeSurgeDetector
+from cs.surge import VolumeSurgeDetector, SURGE_CFG
 from cs.scanner import Scanner, ScanWorker
 from cs.trader import _trader
 from cs.updater import UpdateChecker, GITHUB_RELEASES_PAGE
@@ -206,14 +206,19 @@ class CryptoScannerWindow(QMainWindow):
         ver.setObjectName("versionLabel")
         ver.setToolTip("Application version")
 
-        sub = QLabel("Binance Spot  ·  Price < $1  ·  Vol > $1M  ·  5m")
-        sub.setObjectName("subtitleLabel")
-        sub.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        def _fmt_vol(v):
+            if v >= 1_000_000: return f"${v/1_000_000:.0f}M"
+            return f"${v:,.0f}"
+        self._subtitle_lbl = QLabel(
+            f"Binance Spot  ·  Price < ${CFG['max_price']:.0f}  ·  "
+            f"Vol > {_fmt_vol(CFG['min_volume_usdt'])}  ·  {CFG['interval']}")
+        self._subtitle_lbl.setObjectName("subtitleLabel")
+        self._subtitle_lbl.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
 
         tlay.addWidget(title, 0)
         tlay.addWidget(ver, 0)
         tlay.addSpacing(14)
-        tlay.addWidget(sub, 0)
+        tlay.addWidget(self._subtitle_lbl, 0)
         tlay.addStretch(1)
 
         self._balance_lbl = QLabel("💰 —")
@@ -2118,7 +2123,7 @@ class CryptoScannerWindow(QMainWindow):
         self.al_min_vol_ratio.setRange(0, 5)
         self.al_min_vol_ratio.setDecimals(1)
         self.al_min_vol_ratio.setValue(ALERT_CFG.get("min_vol_ratio", 0.8))
-        self.al_min_vol_ratio.setSuffix("x avg vol")
+        self.al_min_vol_ratio.setSuffix("")
         self.al_min_vol_ratio.setToolTip(
             "Minimum volume ratio vs average\n"
             "ROBO alerts had 0.3x-0.7x — dying volume after dump\n"
@@ -2132,7 +2137,7 @@ class CryptoScannerWindow(QMainWindow):
         self.al_spike_cooldown_pct.setRange(5, 50)
         self.al_spike_cooldown_pct.setDecimals(0)
         self.al_spike_cooldown_pct.setValue(ALERT_CFG.get("spike_pct", 15.0))
-        self.al_spike_cooldown_pct.setSuffix("% spike → 2hr block")
+        self.al_spike_cooldown_pct.setSuffix("%")
         self.al_spike_cooldown_pct.setEnabled(ALERT_CFG.get("spike_cooldown", True))
         self.al_spike_cooldown.toggled.connect(self.al_spike_cooldown_pct.setEnabled)
         self.al_spike_cooldown.setToolTip(
@@ -2147,7 +2152,7 @@ class CryptoScannerWindow(QMainWindow):
         self.al_crash_cooldown_pct.setRange(3, 30)
         self.al_crash_cooldown_pct.setDecimals(0)
         self.al_crash_cooldown_pct.setValue(ALERT_CFG.get("crash_pct", 8.0))
-        self.al_crash_cooldown_pct.setSuffix("% drop → block")
+        self.al_crash_cooldown_pct.setSuffix("%")
         self.al_crash_cooldown_pct.setEnabled(ALERT_CFG.get("crash_cooldown", True))
         self.al_crash_cooldown.toggled.connect(self.al_crash_cooldown_pct.setEnabled)
         self.al_crash_cooldown_mins = QSpinBox()
@@ -2184,7 +2189,7 @@ class CryptoScannerWindow(QMainWindow):
         self.al_squeeze_exempt_width.setDecimals(1)
         self.al_squeeze_exempt_width.setSingleStep(0.5)
         self.al_squeeze_exempt_width.setValue(ALERT_CFG.get("squeeze_exempt_bb_width", 2.0))
-        self.al_squeeze_exempt_width.setSuffix("% BB width")
+        self.al_squeeze_exempt_width.setSuffix("")
         self.al_squeeze_exempt_width.setToolTip(
             "Only exempt exp_move filter when BB width is tighter than this.\n"
             "Lower = stricter (fewer exemptions). Default 2.0%.\n"
@@ -2198,7 +2203,7 @@ class CryptoScannerWindow(QMainWindow):
         self.al_coin_cooldown_mins.setFixedWidth(100)
         self.al_coin_cooldown_mins.setRange(5, 240)
         self.al_coin_cooldown_mins.setValue(ALERT_CFG.get("coin_cooldown_mins", 30))
-        self.al_coin_cooldown_mins.setSuffix(" min cooldown")
+        self.al_coin_cooldown_mins.setSuffix(" min")
         self.al_coin_cooldown_mins.setEnabled(ALERT_CFG.get("coin_cooldown", True))
         self.al_coin_cooldown.toggled.connect(self.al_coin_cooldown_mins.setEnabled)
         self.al_coin_cooldown.setToolTip(
@@ -2270,6 +2275,72 @@ class CryptoScannerWindow(QMainWindow):
         crash_row.addStretch()
         crash_w = QWidget(); crash_w.setLayout(crash_row)
         aglay.addWidget(crash_w,                    row_offset + 9, 0, 1, 2)
+
+        # ── Volume Surge Detector settings ────────────────────────────────
+        surge_grp = QGroupBox("VOLUME SURGE DETECTOR")
+        sglay = QGridLayout(surge_grp)
+        sglay.setSpacing(8)
+
+        self.sg_enabled = QCheckBox("Enable surge detection")
+        self.sg_enabled.setChecked(SURGE_CFG.get("enabled", True))
+        self.sg_enabled.setToolTip("Detects sudden 5m volume spikes on any sub-$1 coin")
+
+        self.sg_vol_5m = QDoubleSpinBox()
+        self.sg_vol_5m.setRange(1.5, 20.0); self.sg_vol_5m.setDecimals(1)
+        self.sg_vol_5m.setSingleStep(0.5); self.sg_vol_5m.setFixedWidth(120)
+        self.sg_vol_5m.setValue(SURGE_CFG.get("vol_5m_mult", 3.0))
+        self.sg_vol_5m.setToolTip("Last 5m candle volume must be Nx average — primary trigger")
+
+        self.sg_max_chg = QDoubleSpinBox()
+        self.sg_max_chg.setRange(5.0, 100.0); self.sg_max_chg.setDecimals(0)
+        self.sg_max_chg.setSingleStep(5); self.sg_max_chg.setFixedWidth(120)
+        self.sg_max_chg.setValue(SURGE_CFG.get("max_price_pct", 30.0))
+        self.sg_max_chg.setSuffix("%")
+        self.sg_max_chg.setToolTip("Skip coins already up more than this % (catch early, not tops)")
+
+        self.sg_min_chg = QDoubleSpinBox()
+        self.sg_min_chg.setRange(0.1, 5.0); self.sg_min_chg.setDecimals(1)
+        self.sg_min_chg.setSingleStep(0.1); self.sg_min_chg.setFixedWidth(120)
+        self.sg_min_chg.setValue(SURGE_CFG.get("min_price_pct", 0.5))
+        self.sg_min_chg.setSuffix("%")
+        self.sg_min_chg.setToolTip("Minimum price move to count as a real surge")
+
+        self.sg_min_vol = QDoubleSpinBox()
+        self.sg_min_vol.setRange(100_000, 10_000_000); self.sg_min_vol.setDecimals(0)
+        self.sg_min_vol.setSingleStep(100_000); self.sg_min_vol.setFixedWidth(120)
+        self.sg_min_vol.setPrefix("$"); self.sg_min_vol.setValue(SURGE_CFG.get("min_vol_usdt", 500_000))
+        self.sg_min_vol.setToolTip("Minimum 24h USDT volume for a coin to be considered")
+
+        self.sg_interval = QSpinBox()
+        self.sg_interval.setRange(10, 120); self.sg_interval.setSingleStep(5)
+        self.sg_interval.setFixedWidth(120); self.sg_interval.setSuffix(" s")
+        self.sg_interval.setValue(SURGE_CFG.get("interval_sec", 30))
+        self.sg_interval.setToolTip("How often the surge detector checks all coins (seconds)")
+
+        self.sg_max_cand = QSpinBox()
+        self.sg_max_cand.setRange(1, 30); self.sg_max_cand.setFixedWidth(120)
+        self.sg_max_cand.setValue(SURGE_CFG.get("max_candidates", 10))
+        self.sg_max_cand.setToolTip("Max coins to fetch klines for per tick (higher = more thorough, more API calls)")
+
+        self.sg_cooldown = QSpinBox()
+        self.sg_cooldown.setRange(1, 240); self.sg_cooldown.setFixedWidth(120)
+        self.sg_cooldown.setSuffix(" min")
+        self.sg_cooldown.setValue(SURGE_CFG.get("cooldown_mins", 60))
+        self.sg_cooldown.setToolTip("Per-coin cooldown between surge alerts — prevents duplicate firing")
+
+        sglay.addWidget(self.sg_enabled, 0, 0, 1, 2)
+        for i, (lbl_text, widget) in enumerate([
+            ("5m vol mult",    self.sg_vol_5m),
+            ("Max price chg",  self.sg_max_chg),
+            ("Min price chg",  self.sg_min_chg),
+            ("Min 24h vol",    self.sg_min_vol),
+            ("Check interval", self.sg_interval),
+            ("Max candidates", self.sg_max_cand),
+            ("Coin cooldown",  self.sg_cooldown),
+        ], 1):
+            lbl = QLabel(lbl_text); lbl.setStyleSheet(f"color:{DIM};")
+            sglay.addWidget(lbl, i, 0)
+            sglay.addWidget(widget, i, 1, Qt.AlignmentFlag.AlignLeft)
 
         top_row = QHBoxLayout()
         top_row.setSpacing(10)
@@ -2382,6 +2453,7 @@ class CryptoScannerWindow(QMainWindow):
 
         top_row.addWidget(ch_grp, 1)
         lay.addLayout(top_row)
+        lay.addWidget(surge_grp)
 
         btn_row2 = QHBoxLayout()
         apply_btn = QPushButton("✓  Apply Alert Settings")
@@ -2503,11 +2575,22 @@ class CryptoScannerWindow(QMainWindow):
         ALERT_CFG["whatsapp"]         = self.al_wa.isChecked()
         ALERT_CFG["wa_number"]        = self.al_wa_number.text().strip()
         ALERT_CFG["picoclaw_queue"]   = self.al_wa_queue.text().strip()
+        # Surge detector config
+        SURGE_CFG["enabled"]       = self.sg_enabled.isChecked()
+        SURGE_CFG["vol_5m_mult"]   = self.sg_vol_5m.value()
+        SURGE_CFG["max_price_pct"] = self.sg_max_chg.value()
+        SURGE_CFG["min_price_pct"] = self.sg_min_chg.value()
+        SURGE_CFG["min_vol_usdt"]  = self.sg_min_vol.value()
+        SURGE_CFG["interval_sec"]  = self.sg_interval.value()
+        SURGE_CFG["max_candidates"]= self.sg_max_cand.value()
+        SURGE_CFG["cooldown_mins"] = self.sg_cooldown.value()
         self.statusBar().showMessage(
             f"Alert settings applied — auto-scan every {ALERT_CFG['interval_sec']}s")
         s = self._settings
         for k, v in ALERT_CFG.items():
             s.setValue(f"alert_{k}", v)
+        for k, v in SURGE_CFG.items():
+            s.setValue(f"surge_{k}", v)
 
     def _test_alert(self):
         fake = {
@@ -3761,6 +3844,13 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         CFG["min_volume_usdt"]      = self.cfg_min_vol.value()
         CFG["interval"]             = self.cfg_interval.currentText()
         CFG["top_n"]                = self.cfg_top_n.value()
+        # Update subtitle to reflect new scan filters
+        if hasattr(self, '_subtitle_lbl'):
+            _v = CFG['min_volume_usdt']
+            _vstr = f"${_v/1_000_000:.0f}M" if _v >= 1_000_000 else f"${_v:,.0f}"
+            self._subtitle_lbl.setText(
+                f"Binance Spot  ·  Price < ${CFG['max_price']:.0f}  ·  "
+                f"Vol > {_vstr}  ·  {CFG['interval']}")
         CFG["picks_n"]              = self.cfg_picks_n.value()
         CFG["candle_limit"]         = self.cfg_candles.value()
         CFG["new_listing_filter"]   = self.cfg_new_listing.isChecked()
@@ -4000,6 +4090,36 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
             self.al_wa_queue.setText(ALERT_CFG["picoclaw_queue"])
         except Exception:
             pass
+
+        # Restore surge detector settings
+        try:
+            for k, default in SURGE_CFG.items():
+                val = s.value(f"surge_{k}")
+                if val is not None:
+                    if isinstance(default, bool):
+                        SURGE_CFG[k] = val in (True, "true", "True", "1")
+                    elif isinstance(default, float):
+                        SURGE_CFG[k] = float(val)
+                    elif isinstance(default, int):
+                        SURGE_CFG[k] = int(float(val))
+            self.sg_enabled.setChecked(SURGE_CFG.get("enabled", True))
+            self.sg_vol_5m.setValue(float(SURGE_CFG.get("vol_5m_mult", 3.0)))
+            self.sg_max_chg.setValue(float(SURGE_CFG.get("max_price_pct", 30.0)))
+            self.sg_min_chg.setValue(float(SURGE_CFG.get("min_price_pct", 0.5)))
+            self.sg_min_vol.setValue(float(SURGE_CFG.get("min_vol_usdt", 500_000)))
+            self.sg_interval.setValue(int(SURGE_CFG.get("interval_sec", 30)))
+            self.sg_max_cand.setValue(int(SURGE_CFG.get("max_candidates", 10)))
+            self.sg_cooldown.setValue(int(SURGE_CFG.get("cooldown_mins", 60)))
+        except Exception:
+            pass
+
+        # Refresh subtitle to reflect restored CFG values
+        if hasattr(self, '_subtitle_lbl'):
+            _v = CFG['min_volume_usdt']
+            _vstr = f"${_v/1_000_000:.0f}M" if _v >= 1_000_000 else f"${_v:,.0f}"
+            self._subtitle_lbl.setText(
+                f"Binance Spot  ·  Price < ${CFG['max_price']:.0f}  ·  "
+                f"Vol > {_vstr}  ·  {CFG['interval']}")
 
     def _save_settings(self):
         s = self._settings

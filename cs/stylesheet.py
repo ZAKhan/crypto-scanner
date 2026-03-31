@@ -295,6 +295,39 @@ QScrollBar::handle:vertical:hover {{
 }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
 
+QCheckBox {{
+    color: {WHITE};
+    font-size: {fs_s}px;
+    spacing: 8px;
+}}
+QCheckBox::indicator {{
+    width: 16px;
+    height: 16px;
+    border: 2px solid {ACCENT};
+    border-radius: 3px;
+    background: {PANEL};
+}}
+QCheckBox::indicator:hover {{
+    border-color: {WHITE};
+    background: {CARD};
+}}
+QCheckBox::indicator:checked {{
+    background: {ACCENT};
+    border-color: {ACCENT};
+    image: none;
+}}
+QCheckBox::indicator:checked:hover {{
+    background: {WHITE};
+    border-color: {WHITE};
+}}
+QCheckBox:disabled {{
+    color: {DIM};
+}}
+QCheckBox::indicator:disabled {{
+    border-color: {DIM};
+    background: {DARK2};
+}}
+
 QStatusBar {{
     background: {PANEL};
     color: {DIM};

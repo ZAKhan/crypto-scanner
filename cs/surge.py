@@ -12,22 +12,30 @@ from cs.indicators import calc_rsi
 
 SURGE_CFG = {
     "enabled":            True,
-    "interval_sec":       60,        # how often to check (matches alert engine)
-    "volume_mult":        3.0,       # vol must grow by this multiple in one tick
-    "max_price_pct":      8.0,       # skip if price already up more than this %
-    "min_price_pct":      1.0,       # skip if price barely moved (not a real surge)
-    "min_vol_usdt":       200_000,   # coin must have at least this 24h volume now
-    "candle_limit":       20,        # candles to fetch for surge candidates
+    "interval_sec":       30,        # how often to check (seconds)
+    # ── Primary trigger: 5m candle volume vs average ──────────
+    "vol_5m_mult":        3.0,       # last 5m candle must be Nx avg 5m vol
+    # ── Price gates ───────────────────────────────────────────
+    "max_price_pct":      30.0,      # skip coins already up more than this %
+    "min_price_pct":      0.5,       # skip if price barely moved
+    # ── Volume floor ──────────────────────────────────────────
+    "min_vol_usdt":       500_000,   # coin must have at least this 24h volume
+    "candle_limit":       20,        # candles to fetch for confirmation
+    "max_candidates":     10,        # max coins to confirm per tick
+    "cooldown_mins":      60,        # per-coin cooldown between surge alerts
 }
 
-# Per-coin volume memory: symbol -> last seen quoteVolume
-_surge_vol_memory = {}   # symbol -> float
+# Per-coin memory: symbol -> last seen 24h quoteVolume
+_surge_vol_memory = {}
+_surge_last_alert = {}   # symbol -> datetime of last surge alert
+
 
 class VolumeSurgeDetector(QObject):
     """
-    Background thread that detects volume surges on ANY coin under $1,
-    not just the top-30 scan list. Emits surge_alert(dict) when a
-    genuine surge is found.
+    Background thread that detects volume surges on ANY coin under $1.
+    Primary trigger: last 5m candle volume > N× average 5m volume.
+    Secondary gate: 24h volume grew vs last check (confirms real activity).
+    Emits surge_alert(dict) when a genuine surge is found.
     """
     surge_alert = pyqtSignal(dict)
 
@@ -59,16 +67,20 @@ class VolumeSurgeDetector(QObject):
                 time.sleep(0.1)
 
     def _check(self):
-        """Fetch all tickers, compare volumes, fire surges."""
         try:
             tickers = fetch_all_tickers()
         except Exception:
             return
 
-        surges = []
+        blocklist = CFG.get("symbol_blocklist", set())
+
+        # Build candidate list from tickers — loose gates only
+        candidates = []
         for t in tickers:
             sym = t.get("symbol", "")
             if not sym.endswith("USDT"):
+                continue
+            if sym in blocklist:
                 continue
             try:
                 price   = float(t["lastPrice"])
@@ -77,75 +89,85 @@ class VolumeSurgeDetector(QObject):
             except Exception:
                 continue
 
-            # Basic gates
             if price <= 0 or price >= CFG["max_price"]:
                 continue
             if vol_24h < SURGE_CFG["min_vol_usdt"]:
                 continue
-
-            prev_vol = _surge_vol_memory.get(sym)
-            _surge_vol_memory[sym] = vol_24h   # always update memory
-
-            if prev_vol is None or prev_vol <= 0:
-                continue   # first time seeing this coin — no comparison yet
-
-            vol_ratio = vol_24h / prev_vol
-
-            # Volume must have grown significantly in this tick
-            if vol_ratio < SURGE_CFG["volume_mult"]:
-                continue
-
-            # Price must have moved — but not too much already
             if chg_pct < SURGE_CFG["min_price_pct"]:
                 continue
             if chg_pct > SURGE_CFG["max_price_pct"]:
-                continue   # already moved too far — likely too late
+                continue
 
-            surges.append({
-                "symbol":    sym,
-                "price":     price,
-                "chg_pct":   chg_pct,
-                "vol_24h":   vol_24h,
-                "vol_ratio": round(vol_ratio, 1),
+            # Update 24h vol memory (keep for reference, no longer a gate)
+            _surge_vol_memory[sym] = vol_24h
+
+            candidates.append({
+                "symbol":  sym,
+                "price":   price,
+                "chg_pct": chg_pct,
+                "vol_24h": vol_24h,
             })
 
-        if not surges:
+        if not candidates:
             return
 
-        # For each surge candidate, fetch candles to confirm
-        for s in surges[:5]:   # cap at 5 per tick to avoid API hammering
+        # For each candidate, fetch 5m candles and use vol_ratio as primary trigger
+        fired = 0
+        for c in candidates:
+            if fired >= SURGE_CFG.get("max_candidates", 10):
+                break
             try:
-                sym   = s["symbol"]
-                raw   = fetch_klines(sym, "5m", SURGE_CFG["candle_limit"])
+                sym = c["symbol"]
+                raw = fetch_klines(sym, "5m", SURGE_CFG["candle_limit"])
                 if not raw or len(raw) < 3:
                     continue
-                candles   = [{"open": float(k[1]), "high": float(k[2]),
-                              "low":  float(k[3]), "close": float(k[4]),
-                              "vol":  float(k[5])} for k in raw]
-                vols      = [c["vol"] for c in candles]
-                avg_vol   = statistics.mean(vols[:-1]) if len(vols) > 1 else vols[0]
-                last_vol  = vols[-1]
-                vol_ratio_5m = round(last_vol / avg_vol, 1) if avg_vol > 0 else 0
 
-                rsi = calc_rsi([c["close"] for c in candles])
+                candles = [{"open": float(k[1]), "high": float(k[2]),
+                            "low":  float(k[3]), "close": float(k[4]),
+                            "vol":  float(k[5])} for k in raw]
+                vols     = [cv["vol"] for cv in candles]
+                # Use all candles except last as baseline average
+                avg_vol  = statistics.mean(vols[:-1]) if len(vols) > 1 else vols[0]
+                last_vol = vols[-1]
+
+                if avg_vol <= 0:
+                    continue
+
+                vol_ratio_5m = round(last_vol / avg_vol, 1)
+
+                # PRIMARY TRIGGER: last 5m candle volume vs average
+                if vol_ratio_5m < SURGE_CFG["vol_5m_mult"]:
+                    continue   # not a surge on 5m timeframe
+
+                # Per-coin cooldown — skip if alerted recently
+                _cooldown_mins = SURGE_CFG.get("cooldown_mins", 60)
+                _last_alert = _surge_last_alert.get(sym)
+                if _last_alert is not None:
+                    _elapsed = (datetime.now() - _last_alert).total_seconds() / 60
+                    if _elapsed < _cooldown_mins:
+                        continue
+
+                rsi = calc_rsi([cv["close"] for cv in candles])
 
                 alert = {
-                    "time":       datetime.now().strftime("%H:%M:%S"),
-                    "symbol":     sym.replace("USDT", ""),
-                    "signal":     "VOLUME SURGE",
-                    "price":      s["price"],
-                    "chg_pct":    round(s["chg_pct"], 2),
-                    "vol_24h_x":  s["vol_ratio"],    # how much 24h vol grew
-                    "vol_5m_x":   vol_ratio_5m,      # last 5m candle vs avg
-                    "rsi":        rsi,
-                    # Fields expected by notification/log systems
-                    "exp":        s["chg_pct"],
-                    "pot":        min(int(s["vol_ratio"] * 10), 100),
-                    "vol":        vol_ratio_5m,
-                    "pattern":    f"24h vol {s['vol_ratio']}x  |  price +{s['chg_pct']:.1f}%",
-                    "surge":      True,              # flag for UI to colour differently
+                    "time":      datetime.now().strftime("%H:%M:%S"),
+                    "symbol":    sym.replace("USDT", ""),
+                    "signal":    "VOLUME SURGE",
+                    "price":     c["price"],
+                    "chg_pct":   round(c["chg_pct"], 2),
+                    "vol_24h_x": round(c["vol_24h"] / max(_surge_vol_memory.get(sym, c["vol_24h"]), 1), 1),
+                    "vol_5m_x":  vol_ratio_5m,
+                    "rsi":       rsi,
+                    # Fields expected by alert log / notification systems
+                    "exp":       c["chg_pct"],
+                    "pot":       min(int(vol_ratio_5m * 10), 100),
+                    "vol":       vol_ratio_5m,
+                    "pattern":   f"5m vol {vol_ratio_5m}x  |  price +{c['chg_pct']:.1f}%",
+                    "surge":     True,
                 }
                 self.surge_alert.emit(alert)
-                time.sleep(0.15)   # small pause between kline fetches
+                _surge_last_alert[sym] = datetime.now()
+                fired += 1
+                time.sleep(0.15)
             except Exception:
                 continue
