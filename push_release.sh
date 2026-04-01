@@ -36,9 +36,7 @@ REQUIRED_FILES=(
 
 OPTIONAL_FILES=(
     LICENSE
-    docs/CHANGELOG_v2_6_0.html
-    docs/CHANGELOG_v2_7_0.html
-    docs/CHANGELOG_v2_8_0.html
+    docs/CHANGELOG_v3.html
 )
 
 ALL_OK=true
@@ -87,11 +85,9 @@ CORE_FILES=(
 DOC_FILES=(
     README.md
     LICENSE
-    docs/CHANGELOG_v2_6_0.html
-    docs/CHANGELOG_v2_7_0.html
-    docs/CHANGELOG_v2_8_0.html
+    docs/CHANGELOG_v3.html
     docs/tutorial.html
-    docs/CryptoScalper_SignalLogic_v3.2.0.docx
+    docs/CryptoScalper_SignalLogic_v3.3.0.docx
 )
 
 # ── Ask for version ──────────────────────────────────────────
@@ -123,6 +119,15 @@ fi
 echo ""
 read -p "Commit message (or Enter for 'release $TAG'): " MSG
 MSG="${MSG:-release $TAG}"
+
+# ── Remove old root-level changelogs if present ─────────────
+step "Cleaning up old changelogs"
+for old_cl in CHANGELOG_v2_6_0.html CHANGELOG_v2_7_0.html CHANGELOG_v2_8_0.html tutorial.html; do
+    if [[ -f "$old_cl" ]]; then
+        git rm --cached "$old_cl" 2>/dev/null && rm -f "$old_cl"
+        echo -e "  ${RED}–${RESET} $old_cl  (removed from root)"
+    fi
+done
 
 # ── Stage core files ─────────────────────────────────────────
 step "Staging files"

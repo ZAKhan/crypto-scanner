@@ -1,6 +1,6 @@
 import os
 
-APP_VERSION = "v3.2.0"
+APP_VERSION = "v3.3.0"
 
 def _get_app_data_dir() -> str:
     import platform

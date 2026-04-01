@@ -16,7 +16,7 @@ SURGE_CFG = {
     # ── Primary trigger: 5m candle volume vs average ──────────
     "vol_5m_mult":        3.0,       # last 5m candle must be Nx avg 5m vol
     # ── Price gates ───────────────────────────────────────────
-    "max_price_pct":      30.0,      # skip coins already up more than this %
+    "max_price_pct":      100.0,     # skip coins already up more than this % on 24h
     "min_price_pct":      0.5,       # skip if price barely moved
     # ── Volume floor ──────────────────────────────────────────
     "min_vol_usdt":       500_000,   # coin must have at least this 24h volume

@@ -1760,7 +1760,7 @@ class CryptoScannerWindow(QMainWindow):
             os.makedirs(APP_LOGS_DIR, exist_ok=True)
             tmp = self.ALERTS_FILE + ".tmp"
             safe_alerts = []
-            for a in self._alert_log[-50:]:
+            for a in self._alert_log:
                 safe = {}
                 for k, v in a.items():
                     safe[k] = str(v) if not isinstance(v, (str, int, float, bool)) else v
@@ -2751,8 +2751,7 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
                 if _item:
                     _item.setBackground(surge_bg)
 
-        while tbl.rowCount() > 20:
-            tbl.removeRow(tbl.rowCount() - 1)
+        # No row limit — list grows until user clicks Clear Log
 
         if flash and hasattr(self, '_alerts_sub_tabs'):
             pass   # don't switch tabs — user may be on Settings
@@ -2843,8 +2842,6 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
 
     def _on_new_alert(self, alert):
         self._alert_log.append(alert)
-        if len(self._alert_log) > 50:
-            self._alert_log = self._alert_log[-50:]
 
         sig = alert["signal"]
         sym = alert["symbol"]
@@ -2866,8 +2863,6 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
 
     def _on_surge_alert(self, alert):
         self._alert_log.append(alert)
-        if len(self._alert_log) > 50:
-            self._alert_log = self._alert_log[-50:]
         if self._ws_feed:
             ws_sym = alert.get("symbol", "").replace("USDT", "") + "USDT"
             self._ws_feed.subscribe_alert(ws_sym)
