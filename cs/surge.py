@@ -93,8 +93,6 @@ class VolumeSurgeDetector(QObject):
                 continue
             if vol_24h < SURGE_CFG["min_vol_usdt"]:
                 continue
-            if chg_pct < SURGE_CFG["min_price_pct"]:
-                continue
             if chg_pct > SURGE_CFG["max_price_pct"]:
                 continue
 

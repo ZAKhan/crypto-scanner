@@ -2755,7 +2755,7 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
             tbl.removeRow(tbl.rowCount() - 1)
 
         if flash and hasattr(self, '_alerts_sub_tabs'):
-            self._alerts_sub_tabs.setCurrentIndex(0)
+            pass   # don't switch tabs — user may be on Settings
 
         self._refresh_alert_pnl_summary()
 

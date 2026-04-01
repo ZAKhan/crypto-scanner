@@ -91,7 +91,7 @@ DOC_FILES=(
     docs/CHANGELOG_v2_7_0.html
     docs/CHANGELOG_v2_8_0.html
     docs/tutorial.html
-    docs/CryptoScalper_SignalLogic_v3.1.0.docx
+    docs/CryptoScalper_SignalLogic_v3.2.0.docx
 )
 
 # ── Ask for version ──────────────────────────────────────────
