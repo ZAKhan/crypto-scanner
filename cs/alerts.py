@@ -353,9 +353,10 @@ class AlertEngine(QObject):
                 pot   >= ALERT_CFG["min_potential"] and
                 (exp  >= ALERT_CFG["min_exp_move"] or _squeeze_exemption) and
                 r.get("rsi", 50) <= ALERT_CFG["max_rsi"] and
-                r.get("bb_pct", 50) <= ALERT_CFG["max_bb_pct"] and
+                r.get("bb_pos", 50) <= ALERT_CFG["max_bb_pct"] and
                 r.get("adr_pct", 0) >= ALERT_CFG["min_adr_pct"] and
-                r.get("vol_ratio", 0) >= ALERT_CFG.get("min_vol_ratio", 1.0) and  # vol never bypassed
+                (r.get("vol_ratio", 0) >= ALERT_CFG.get("min_vol_ratio", 1.0) or
+                 sig == "PRE-BREAKOUT") and  # PRE-BREAKOUT fires before volume arrives
                 _pattern_ok and
                 (not ALERT_CFG.get("block_downtrend") or
                  not any(p in _pattern for p in ("Downtrend", "Rejection"))) and

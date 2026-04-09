@@ -67,7 +67,7 @@ class Scanner:
                     data = analyse(sym, raw, coin["change"], trend_1h=t1h)
                     if "BUY" in data["signal"] or data["signal"] == "PRE-BREAKOUT":
                         ctx = market_context(data["candles"])
-                        if ctx["structure_score"] <= -2:
+                        if ctx["structure_score"] <= -1:
                             data["signal"]      = "NEUTRAL"
                             data["sig_clr"]     = "yellow"
                             data["ctx_blocked"] = True

@@ -19,7 +19,7 @@ ALERT_CFG = {
     "min_potential":    50,         # raised 40 → 50
     "min_exp_move":     2.0,        # kept at 2.0 — vol gate is the real filter
     "squeeze_exempt_bb_width": 2.0, # tightened 3.0 → 2.0
-    "max_rsi":          65,         # lowered 70 → 65
+    "max_rsi":          70,         # per spec: RSI <= 70
     "max_bb_pct":       70,         # lowered 80 → 70
     "require_vol_spike": False,
     "min_adr_pct":      0.8,        # raised 0.5 → 0.8: coin must have real daily range
@@ -137,7 +137,8 @@ def log_scan_results(results, alert_cfg=None, safety_cfg=None, trades=None):
                     (exp >= ALERT_CFG.get("min_exp_move", 0) or _sqex) and
                     rsi  <= ALERT_CFG.get("max_rsi", 100) and
                     bb_pct_raw <= ALERT_CFG.get("max_bb_pct", 200) and
-                    r.get("vol_ratio", 0) >= ALERT_CFG.get("min_vol_ratio", 1.0) and
+                    (r.get("vol_ratio", 0) >= ALERT_CFG.get("min_vol_ratio", 1.0) or
+                     sig == "PRE-BREAKOUT") and  # PRE-BREAKOUT fires before volume arrives
                     _pat_ok and
                     (not ALERT_CFG.get("block_downtrend") or not any(p in _pat for p in ("Downtrend", "Rejection"))) and
                     (not ALERT_CFG.get("require_macd_rising") or r.get("macd_rising", False)) and

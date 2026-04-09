@@ -22,7 +22,7 @@ SAFETY_CFG = {
     "daily_loss_limit":         True,
     "daily_loss_amount":        100.0,
     "coin_trend_check":         True,
-    "coin_drop_pct":            5.0,
+    "coin_drop_pct":            30.0,  # block coins down more than this % in 24h
 }
 
 _daily_loss_tracker      = {"date": "", "loss": 0.0}
@@ -135,6 +135,17 @@ def check_trade_safety(r, trades, balance_usdt=0.0):
     # Layer 2 — Coin 24h trend
     if SAFETY_CFG["coin_trend_check"]:
         chg_24h = r.get("change", 0)
+        # If Binance returns 0 but RSI is deeply oversold and coin is in freefall,
+        # treat the 0 as unreliable — check kline-based trend instead
+        if chg_24h == 0:
+            try:
+                candles = r.get("candles", [])
+                if len(candles) >= 20:
+                    chg_kline = (candles[-1]["close"] - candles[0]["close"]) / candles[0]["close"] * 100
+                    if chg_kline < -SAFETY_CFG["coin_drop_pct"]:
+                        return False, f"{sym} kline trend {chg_kline:.1f}% — freefall (24h=0 unreliable)"
+            except Exception:
+                pass
         if chg_24h < -SAFETY_CFG["coin_drop_pct"]:
             return False, f"{sym} down {chg_24h:.1f}% in 24h — downtrend"
 

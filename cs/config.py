@@ -1,6 +1,6 @@
 import os
 
-APP_VERSION = "v3.3.0"
+APP_VERSION = "v3.7.0"
 
 def _get_app_data_dir() -> str:
     import platform
@@ -18,9 +18,9 @@ APP_LOGS_DIR = os.path.join(APP_DATA_DIR, "logs")
 
 CFG = {
     "max_price":       1.0,
-    "min_volume_usdt": 3_000_000,   # raised 1M → 3M: filters thin/illiquid coins
+    "min_volume_usdt": 500_000,     # 500K USDT — liquidity floor per spec
     "interval":        "5m",
-    "candle_limit":    50,
+    "candle_limit":    70,
     "top_n":           30,
     "picks_n":         5,
     "rsi_period":      14,

@@ -5,6 +5,7 @@ import time
 import subprocess
 import threading
 import requests
+import collections
 from datetime import datetime
 
 from PyQt6.QtWidgets import (
@@ -31,9 +32,29 @@ from cs.stylesheet import (
     DARK, DARK2, PANEL, CARD, BORDER, ACCENT, GREEN, RED, YELLOW, WHITE, DIM,
     STRONG_BUY_BG, STRONG_SELL_BG, BUY_BG, SELL_BG,
     MONO_CSS, MONO_FAMILIES, MONO, mono_font, SANS, FONT_SIZE, BROWSER_PATH,
-    make_stylesheet
+    make_stylesheet, set_theme, CURRENT_THEME
 )
 import cs.stylesheet as _stylesheet_mod
+
+
+def _sync_theme_colors():
+    """Sync module-level color names in this module to the active cs.stylesheet theme.
+
+    ``from cs.stylesheet import DARK, PANEL, ...`` creates local *snapshots* at
+    import time (always CYBER defaults).  Calling this after ``set_theme()``
+    propagates the new values so that every f-string inside ``_build_ui`` and
+    other widget constructors picks up the correct theme colours.
+    """
+    g = globals()
+    for _name in (
+        "DARK", "DARK2", "PANEL", "CARD", "BORDER", "ACCENT",
+        "GREEN", "RED", "YELLOW", "WHITE", "DIM",
+        "STRONG_BUY_BG", "STRONG_SELL_BG", "BUY_BG", "SELL_BG",
+        "CURRENT_THEME",
+    ):
+        g[_name] = getattr(_stylesheet_mod, _name)
+
+
 from cs.safety import (
     SAFETY_CFG, _daily_loss_tracker,
     check_trade_safety, record_trade_loss
@@ -41,6 +62,7 @@ from cs.safety import (
 from cs.logger import ALERT_CFG, _get_signal_log_path, SIGNAL_LOG_PATH, log_scan_results
 from cs.alerts import AlertEngine, _outcome_tracker
 from cs.surge import VolumeSurgeDetector, SURGE_CFG
+from cs.momentum import MomentumDetector, MOMENTUM_CFG  # detector kept, tab removed
 from cs.scanner import Scanner, ScanWorker
 from cs.trader import _trader
 from cs.updater import UpdateChecker, GITHUB_RELEASES_PAGE
@@ -139,11 +161,25 @@ class CryptoScannerWindow(QMainWindow):
         self._results  = []
         self._live_prices = {}
         self._settings = QSettings("CryptoScalper", "CryptoScannerGUI")
+
+        # ── Apply theme BEFORE building UI so all inline widget stylesheets
+        #    use the correct colour constants (not the import-time snapshots).
+        _early_theme = self._settings.value("theme", "TRADER")
+        if _early_theme not in ("CYBER", "TRADER"):
+            _early_theme = "TRADER"
+        _stylesheet_mod.set_theme(_early_theme)
+        _sync_theme_colors()   # rebind DARK, PANEL, ACCENT … in this module
+        QApplication.instance().setStyleSheet(
+            make_stylesheet(FONT_SIZE, _early_theme))
+
         self._trades   = []
         self._programmatic_resize = False
         self._sort_col  = None
         self._sort_asc  = True
         self._alert_log = []
+        self._alert_symbols = set()
+        self._symbol_history: dict = {}
+        self._last_scan_dt  = None
         self._flash_overlay = None
         self._flash_anim    = None
         self._title_flash_timer = QTimer(self)
@@ -159,6 +195,8 @@ class CryptoScannerWindow(QMainWindow):
 
         self._surge_detector = VolumeSurgeDetector()
         self._surge_detector.surge_alert.connect(self._on_surge_alert)
+        self._momentum_detector = MomentumDetector()
+        self._momentum_detector.momentum_alert.connect(self._on_momentum_alert)
 
         if _WS_AVAILABLE:
             self._ws_feed = BinanceWebSocketPrices()
@@ -173,11 +211,13 @@ class CryptoScannerWindow(QMainWindow):
         self._trades_refresh_timer.start()
         self._alert_engine.start()
         self._surge_detector.start()
+        self._momentum_detector.start()
         _outcome_tracker.start()
         if self._ws_feed:
             open_syms = {t["symbol"] for t in self._trades if t["status"] == "OPEN"}
             if open_syms:
                 self._ws_feed.subscribe(open_syms)
+            self._ws_feed.start()
         QTimer.singleShot(1000, self._refresh_balance_display)
         QTimer.singleShot(5000, self._start_update_check)
         self.statusBar().showMessage("Starting scan…")
@@ -305,11 +345,39 @@ class CryptoScannerWindow(QMainWindow):
 
         scanner_tab = QWidget()
         slay = QVBoxLayout(scanner_tab)
-        slay.setContentsMargins(8, 8, 8, 8)
-        slay.setSpacing(6)
+        slay.setContentsMargins(8, 6, 8, 8)
+        slay.setSpacing(4)
+
+        # ── Live dashboard header ───────────────────────────────────────────
+        dash_bar = QFrame()
+        dash_bar.setStyleSheet(f"background: transparent; border: none;")
+        dash_bar.setFixedHeight(28)
+        dash_lay = QHBoxLayout(dash_bar)
+        dash_lay.setContentsMargins(4, 0, 4, 0)
+        dash_lay.setSpacing(0)
+        self._dash_title = QLabel("CryptoScanner — live dashboard")
+        self._dash_title.setStyleSheet(
+            f"color:{WHITE}; font-family:{MONO_CSS}; font-size:{FONT_SIZE-1}px; font-weight:700;")
+        self._scan_cycle_lbl = QLabel("scan cycle —")
+        self._scan_cycle_lbl.setStyleSheet(
+            f"color:{DIM}; font-family:{MONO_CSS}; font-size:{FONT_SIZE-2}px;")
+        dash_lay.addWidget(self._dash_title, 0)
+        dash_lay.addStretch(1)
+        dash_lay.addWidget(self._scan_cycle_lbl, 0)
+        slay.addWidget(dash_bar)
+
+        # ── Heat legend bar ─────────────────────────────────────────────────
+        slay.addWidget(self._build_heat_legend())
+
         self.table = self._build_table()
         slay.addWidget(self.table)
         tabs.addTab(scanner_tab, "📊  Scanner")
+
+        # Timer to keep "scan cycle X ago" label fresh
+        self._scan_age_timer = QTimer(self)
+        self._scan_age_timer.setInterval(10_000)
+        self._scan_age_timer.timeout.connect(self._update_scan_cycle_lbl)
+        self._scan_age_timer.start()
 
         self.picks_tab = QWidget()
         picks_outer = QVBoxLayout(self.picks_tab)
@@ -359,10 +427,67 @@ class CryptoScannerWindow(QMainWindow):
         )
         self.statusBar().addPermanentWidget(ver_lbl)
 
+    # ─── HEAT LEGEND / SCAN-CYCLE HELPERS ────────────────────────────────────
+
+    def _build_heat_legend(self):
+        """Build the heat-state legend bar shown above the scanner table."""
+        bar = QFrame()
+        bar.setStyleSheet(
+            f"background:{DARK2}; border:1px solid {BORDER}; border-radius:4px;")
+        bar.setFixedHeight(26)
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(10, 0, 10, 0)
+        lay.setSpacing(0)
+
+        _fss = f"font-family:{MONO_CSS}; font-size:{FONT_SIZE-3}px;"
+
+        def _dot(color, label):
+            dot = QLabel(f"● {label}")
+            dot.setStyleSheet(f"color:{color}; {_fss} padding-right:14px;")
+            return dot
+
+        lay.addWidget(_dot("#4caf50", "alerted"))
+        lay.addWidget(_dot("#ffa726", "building"))
+        lay.addWidget(_dot("#e53935", "suppressed — check manually"))
+        lay.addWidget(_dot("#42a5f5", "watch"))
+        lay.addWidget(_dot("#757575", "cooling"))
+        lay.addStretch(1)
+
+        sep = QLabel("|")
+        sep.setStyleSheet(f"color:{BORDER}; {_fss} padding:0 10px;")
+        lay.addWidget(sep)
+
+        cell_lbl = QLabel("cell")
+        cell_lbl.setStyleSheet(
+            f"color:{ACCENT}; border:1px solid {ACCENT}; border-radius:3px; "
+            f"padding:1px 5px; {_fss}")
+        lay.addWidget(cell_lbl)
+
+        desc = QLabel("  = blocking strong buy")
+        desc.setStyleSheet(f"color:{DIM}; {_fss}")
+        lay.addWidget(desc)
+
+        return bar
+
+    def _update_scan_cycle_lbl(self):
+        if not hasattr(self, "_scan_cycle_lbl"):
+            return
+        if self._last_scan_dt is None:
+            self._scan_cycle_lbl.setText("scan cycle —")
+            return
+        elapsed = int((datetime.now() - self._last_scan_dt).total_seconds())
+        if elapsed < 60:
+            age_str = f"{elapsed}s ago"
+        else:
+            age_str = f"{elapsed // 60}m ago"
+        tz_str = datetime.now().strftime("%m-%d %H:%M")
+        self._scan_cycle_lbl.setText(f"scan cycle {age_str}  |  {tz_str}")
+
     def _build_table(self):
         cols = ["#", "Symbol", "Price", "24h%", "RSI", "StRSI",
                 "MACD", "BB%", "Vol 24h", "Signal", "Pot%", "Exp%", "L/S", "Pattern", "Chart",
-                "AGE", "CONF", "1H", ""]
+                "AGE", "CONF", "1H", "",
+                "VOL▲", "HEAT", "BLOCKER"]
 
         COL_TIPS = {
             0:  "Rank — sorted by potential score after each scan",
@@ -420,6 +545,12 @@ class CryptoScannerWindow(QMainWindow):
                 "↑ Up  = 1H close above 1H EMA (aligns with long)\n"
                 "↓ Down = 1H close below 1H EMA (aligns with short)\n"
                 "→ Flat = no clear trend",
+            19: "VOL▲ — 5-bar volume trend sparkline\n"
+                "Gray = <2x average  |  Green = 2–4x  |  Amber = 4–6x  |  Red = >6x",
+            20: "HEAT — current market heat status\n"
+                "ALERTED = alert fired  |  SUPPRESSED = blocked strong signal\n"
+                "BUILDING = vol rising  |  WATCH = moderate vol  |  COOLING = fading",
+            21: "BLOCKER — reason this coin cannot trigger a STRONG BUY alert",
         }
 
         t = QTableWidget(0, len(cols))
@@ -440,9 +571,9 @@ class CryptoScannerWindow(QMainWindow):
         t.setShowGrid(True)
 
         hdr = t.horizontalHeader()
-        for i in range(len(cols) - 1):
+        for i in range(len(cols)):
             hdr.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
-        hdr.setSectionResizeMode(18, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(21, QHeaderView.ResizeMode.Stretch)
         t.setColumnHidden(18, True)
 
         t.itemDoubleClicked.connect(self._on_row_double_click)
@@ -455,12 +586,14 @@ class CryptoScannerWindow(QMainWindow):
         5:  0.048, 6:  0.048, 7:  0.044, 8:  0.068, 9:  0.088,
         10: 0.044, 11: 0.044, 12: 0.055, 13: 0.100, 14: 0.068,
         15: 0.048, 16: 0.048, 17: 0.040,
+        19: 0.045, 20: 0.045, 21: 0.045,
     }
     _COL_MINS = {
         0:  28,  1:  62,  2:  68,  3:  48,  4:  40,
         5:  44,  6:  44,  7:  40,  8:  64,  9:  84,
         10: 40,  11: 40,  12: 50,  13: 86,  14: 62,
         15: 42,  16: 42,  17: 32,
+        19: 42,  20: 70,  21: 42,
     }
 
     def _reflow_columns(self):
@@ -1795,8 +1928,43 @@ class CryptoScannerWindow(QMainWindow):
                     ws_sym = alert.get("symbol", "") + "USDT"
                     self._ws_feed.subscribe_alert(ws_sym)
             self._update_history_tab_badge()
+            # Fetch current prices via REST for all loaded alert symbols so the
+            # LIVE P&L column shows immediately without waiting for the first WS tick.
+            alert_syms = list({
+                a.get("symbol", "").replace("USDT", "") + "USDT"
+                for a in self._alert_log
+                if a.get("symbol")
+            })
+            if alert_syms:
+                threading.Thread(
+                    target=self._fetch_alert_prices_rest,
+                    args=(alert_syms,),
+                    daemon=True,
+                ).start()
         except Exception as e:
             print(f"[WARN] Could not load alerts: {e}")
+
+    def _fetch_alert_prices_rest(self, symbols: list):
+        """Bulk-fetch all Binance prices in one request and populate _live_prices
+        for alert symbols. Much faster than per-symbol calls and avoids rate limits."""
+        try:
+            resp = requests.get(
+                f"{CFG['base_url']}/api/v3/ticker/price",
+                timeout=10)
+            data = resp.json()
+            if not isinstance(data, list):
+                return
+            sym_set = set(symbols)
+            for item in data:
+                s = item.get("symbol", "")
+                p = item.get("price")
+                if s in sym_set and p:
+                    try:
+                        self._live_prices[s] = float(p)
+                    except (ValueError, TypeError):
+                        pass
+        except Exception:
+            pass
 
     def _on_tab_changed(self, index):
         tab_text = self._tabs_widget.tabText(index)
@@ -2305,6 +2473,18 @@ class CryptoScannerWindow(QMainWindow):
         self.sg_min_chg.setSuffix("%")
         self.sg_min_chg.setToolTip("Minimum price move to count as a real surge")
 
+        self.sg_min_up = QDoubleSpinBox()
+        self.sg_min_up.setRange(-10.0, 20.0); self.sg_min_up.setDecimals(1)
+        self.sg_min_up.setSingleStep(0.5); self.sg_min_up.setFixedWidth(120)
+        self.sg_min_up.setValue(SURGE_CFG.get("min_chg_pct", 1.0))
+        self.sg_min_up.setSuffix("%")
+        self.sg_min_up.setToolTip("Coin must be up at least this % on 24h — filters crash dump volume")
+
+        self.sg_max_rsi = QSpinBox()
+        self.sg_max_rsi.setRange(50, 100); self.sg_max_rsi.setFixedWidth(120)
+        self.sg_max_rsi.setValue(int(SURGE_CFG.get("max_rsi", 80)))
+        self.sg_max_rsi.setToolTip("Skip if RSI exceeds this — avoids overbought blown-out coins")
+
         self.sg_min_vol = QDoubleSpinBox()
         self.sg_min_vol.setRange(100_000, 10_000_000); self.sg_min_vol.setDecimals(0)
         self.sg_min_vol.setSingleStep(100_000); self.sg_min_vol.setFixedWidth(120)
@@ -2325,7 +2505,7 @@ class CryptoScannerWindow(QMainWindow):
         self.sg_cooldown = QSpinBox()
         self.sg_cooldown.setRange(1, 240); self.sg_cooldown.setFixedWidth(120)
         self.sg_cooldown.setSuffix(" min")
-        self.sg_cooldown.setValue(SURGE_CFG.get("cooldown_mins", 60))
+        self.sg_cooldown.setValue(SURGE_CFG.get("cooldown_mins", 20))
         self.sg_cooldown.setToolTip("Per-coin cooldown between surge alerts — prevents duplicate firing")
 
         sglay.addWidget(self.sg_enabled, 0, 0, 1, 2)
@@ -2333,6 +2513,8 @@ class CryptoScannerWindow(QMainWindow):
             ("5m vol mult",    self.sg_vol_5m),
             ("Max price chg",  self.sg_max_chg),
             ("Min price chg",  self.sg_min_chg),
+            ("Min up 24h",     self.sg_min_up),
+            ("Max RSI",        self.sg_max_rsi),
             ("Min 24h vol",    self.sg_min_vol),
             ("Check interval", self.sg_interval),
             ("Max candidates", self.sg_max_cand),
@@ -2455,6 +2637,74 @@ class CryptoScannerWindow(QMainWindow):
         lay.addLayout(top_row)
         lay.addWidget(surge_grp)
 
+        # ── Momentum Detector settings ────────────────────────────────
+        mom_grp = QGroupBox("MOMENTUM DETECTOR")
+        momlay = QGridLayout(mom_grp)
+        momlay.setSpacing(8)
+
+        self.mom_enabled = QCheckBox("Enable momentum detection  (fills MOMENTUM column in alert table)")
+        self.mom_enabled.setChecked(MOMENTUM_CFG.get("enabled", True))
+        self.mom_enabled.setStyleSheet(f"color:{WHITE};")
+
+        self.mom_sound   = QCheckBox("🔊  Sound alert on momentum signal")
+        self.mom_sound.setChecked(MOMENTUM_CFG.get("sound", True))
+        self.mom_sound.setStyleSheet(f"color:{WHITE};")
+
+        self.mom_desktop = QCheckBox("🖥  Desktop notification on momentum signal")
+        self.mom_desktop.setChecked(MOMENTUM_CFG.get("desktop", True))
+        self.mom_desktop.setStyleSheet(f"color:{WHITE};")
+
+        self.mom_vol_5m   = QDoubleSpinBox()
+        self.mom_vol_5m.setRange(1.5, 20.0); self.mom_vol_5m.setDecimals(1)
+        self.mom_vol_5m.setFixedWidth(120); self.mom_vol_5m.setValue(MOMENTUM_CFG.get("vol_5m_mult", 3.0))
+        self.mom_vol_5m.setToolTip("5m candle must be Nx average to trigger")
+
+        self.mom_min_chg  = QDoubleSpinBox()
+        self.mom_min_chg.setRange(0.1, 50.0); self.mom_min_chg.setDecimals(1)
+        self.mom_min_chg.setFixedWidth(120); self.mom_min_chg.setSuffix("%")
+        self.mom_min_chg.setValue(MOMENTUM_CFG.get("min_chg_pct", 2.0))
+        self.mom_min_chg.setToolTip("Minimum 24h price change — only fires on coins moving UP")
+
+        self.mom_max_rsi  = QSpinBox()
+        self.mom_max_rsi.setRange(50, 100); self.mom_max_rsi.setFixedWidth(120)
+        self.mom_max_rsi.setValue(int(MOMENTUM_CFG.get("max_rsi", 85)))
+        self.mom_max_rsi.setToolTip("Skip if RSI exceeds this — avoids completely blown-out tops")
+
+        self.mom_min_vol  = QDoubleSpinBox()
+        self.mom_min_vol.setRange(0, 10_000_000); self.mom_min_vol.setDecimals(0)
+        self.mom_min_vol.setFixedWidth(120); self.mom_min_vol.setPrefix("$")
+        self.mom_min_vol.setValue(MOMENTUM_CFG.get("min_vol_usdt", 500_000))
+
+        self.mom_interval = QSpinBox()
+        self.mom_interval.setRange(10, 300); self.mom_interval.setFixedWidth(120)
+        self.mom_interval.setSuffix(" s"); self.mom_interval.setValue(int(MOMENTUM_CFG.get("interval_sec", 30)))
+
+        self.mom_max_cand = QSpinBox()
+        self.mom_max_cand.setRange(1, 20); self.mom_max_cand.setFixedWidth(120)
+        self.mom_max_cand.setValue(int(MOMENTUM_CFG.get("max_candidates", 5)))
+
+        self.mom_cooldown = QSpinBox()
+        self.mom_cooldown.setRange(1, 240); self.mom_cooldown.setFixedWidth(120)
+        self.mom_cooldown.setSuffix(" min"); self.mom_cooldown.setValue(int(MOMENTUM_CFG.get("cooldown_mins", 20)))
+
+        momlay.addWidget(self.mom_enabled,  0, 0, 1, 2)
+        momlay.addWidget(self.mom_sound,    1, 0, 1, 2)
+        momlay.addWidget(self.mom_desktop,  2, 0, 1, 2)
+        for i, (lbl_text, widget) in enumerate([
+            ("5m vol mult",    self.mom_vol_5m),
+            ("Min price chg",  self.mom_min_chg),
+            ("Max RSI",        self.mom_max_rsi),
+            ("Min 24h vol",    self.mom_min_vol),
+            ("Check interval", self.mom_interval),
+            ("Max candidates", self.mom_max_cand),
+            ("Coin cooldown",  self.mom_cooldown),
+        ], 3):
+            lbl = QLabel(lbl_text); lbl.setStyleSheet(f"color:{DIM};")
+            momlay.addWidget(lbl, i, 0)
+            momlay.addWidget(widget, i, 1, Qt.AlignmentFlag.AlignLeft)
+
+        lay.addWidget(mom_grp)
+
         btn_row2 = QHBoxLayout()
         apply_btn = QPushButton("✓  Apply Alert Settings")
         apply_btn.clicked.connect(self._apply_alert_config)
@@ -2484,6 +2734,17 @@ class CryptoScannerWindow(QMainWindow):
             f"border-radius:4px; font-size:11px; padding:0 10px;")
         hist_clear2.clicked.connect(self._clear_alert_log)
         hist_header.addWidget(hist_clear2)
+
+        sig_filter_lbl = QLabel("Signal:")
+        sig_filter_lbl.setStyleSheet(f"color:{DIM}; font-size:11px; margin-left:10px;")
+        hist_header.addWidget(sig_filter_lbl)
+        self.al_signal_filter = QComboBox()
+        self.al_signal_filter.setFixedWidth(145)
+        for s in ["All Signals", "STRONG BUY", "BUY", "PRE-BREAKOUT", "STRONG SELL", "SELL", "VOLUME SURGE"]:
+            self.al_signal_filter.addItem(s)
+        self.al_signal_filter.currentTextChanged.connect(self._apply_alert_signal_filter)
+        hist_header.addWidget(self.al_signal_filter)
+
         history_lay.addLayout(hist_header)
 
         self.al_history_stats = QLabel("No alerts yet — waiting for signals")
@@ -2510,9 +2771,9 @@ class CryptoScannerWindow(QMainWindow):
         pnl_bar.addStretch()
         history_lay.addLayout(pnl_bar)
 
-        self.alert_log_table = QTableWidget(0, 6)
+        self.alert_log_table = QTableWidget(0, 7)
         self.alert_log_table.setHorizontalHeaderLabels(
-            ["TIME", "SYMBOL", "SIGNAL", "DETAILS", "ENTRY", "LIVE P&L"])
+            ["TIME", "SYMBOL", "SIGNAL", "DETAILS", "ENTRY", "LIVE P&L", "MOMENTUM"])
         self.alert_log_table.verticalHeader().setVisible(False)
         self.alert_log_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.alert_log_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -2520,6 +2781,7 @@ class CryptoScannerWindow(QMainWindow):
         self.alert_log_table.setAlternatingRowColors(False)
         self.alert_log_table.setSortingEnabled(False)
         self.alert_log_table.setShowGrid(True)
+        self.alert_log_table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.alert_log_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.alert_log_table.customContextMenuRequested.connect(self._alerts_context_menu)
         al_hdr = self.alert_log_table.horizontalHeader()
@@ -2529,6 +2791,7 @@ class CryptoScannerWindow(QMainWindow):
         al_hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         al_hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         al_hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        al_hdr.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
         al_hdr.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         history_lay.addWidget(self.alert_log_table)
 
@@ -2580,6 +2843,8 @@ class CryptoScannerWindow(QMainWindow):
         SURGE_CFG["vol_5m_mult"]   = self.sg_vol_5m.value()
         SURGE_CFG["max_price_pct"] = self.sg_max_chg.value()
         SURGE_CFG["min_price_pct"] = self.sg_min_chg.value()
+        SURGE_CFG["min_chg_pct"]   = self.sg_min_up.value()
+        SURGE_CFG["max_rsi"]       = int(self.sg_max_rsi.value())
         SURGE_CFG["min_vol_usdt"]  = self.sg_min_vol.value()
         SURGE_CFG["interval_sec"]  = self.sg_interval.value()
         SURGE_CFG["max_candidates"]= self.sg_max_cand.value()
@@ -2690,12 +2955,16 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         if is_surge:
             col = "#ff9500"
 
+        chg_color = DIM  # default; overridden for surge alerts below
         try:
             if is_surge:
+                chg = float(alert.get('chg_pct', 0))
+                chg_color = GREEN if chg >= 2.0 else (RED if chg <= -2.0 else DIM)
+                chg_sign = "+" if chg >= 0 else ""
                 detail_text = (
                     f"24h vol {alert.get('vol_24h_x',0)}x  ·  "
                     f"5m vol {float(alert.get('vol_5m_x',0)):.1f}x  ·  "
-                    f"Price +{float(alert.get('chg_pct',0)):.1f}%  ·  "
+                    f"Price {chg_sign}{chg:.1f}%  ·  "
                     f"RSI {float(alert.get('rsi',0)):.0f}")
             else:
                 detail_text = (
@@ -2712,6 +2981,7 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
             price_text = str(alert.get("price", ""))
 
         tbl = self.alert_log_table
+        tbl.setUpdatesEnabled(False)
         tbl.insertRow(0)
 
         def cell(text, color=None, bold=False, align=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter):
@@ -2735,7 +3005,8 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         })
         tbl.setItem(0, 1, cell(alert.get("symbol", "").replace("USDT",""), ACCENT, bold=True))
         tbl.setItem(0, 2, cell(sig, col, bold=True))
-        tbl.setItem(0, 3, cell(detail_text, DIM))
+        detail_color = chg_color if is_surge else DIM
+        tbl.setItem(0, 3, cell(detail_text, detail_color))
         tbl.setItem(0, 4, cell(price_text, WHITE,
                                align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter))
         # LIVE P&L — populate immediately if we already have a price
@@ -2743,6 +3014,8 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         cur_price = self._live_prices.get(sym_ws)
         pnl_item = self._make_pnl_item(entry_price, cur_price)
         tbl.setItem(0, 5, pnl_item)
+        # MOMENTUM — filled in later by _on_momentum_alert if same coin fires
+        tbl.setItem(0, 6, cell("—", DIM, align=Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter))
 
         if is_surge:
             surge_bg = QColor("#2a1f00")
@@ -2751,7 +3024,19 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
                 if _item:
                     _item.setBackground(surge_bg)
 
-        # No row limit — list grows until user clicks Clear Log
+        # UI cap — keep last 500 rows (24h of alerts). Full history in alerts.json
+        while tbl.rowCount() > 500:
+            tbl.removeRow(tbl.rowCount() - 1)
+
+        tbl.setUpdatesEnabled(True)
+
+        # Hide new row if it doesn't match the active signal filter
+        if hasattr(self, 'al_signal_filter'):
+            choice = self.al_signal_filter.currentText()
+            if choice != "All Signals":
+                sig_item = tbl.item(0, 2)
+                if sig_item and sig_item.text() != choice:
+                    tbl.setRowHidden(0, True)
 
         if flash and hasattr(self, '_alerts_sub_tabs'):
             pass   # don't switch tabs — user may be on Settings
@@ -2792,25 +3077,41 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         if not hasattr(self, 'alert_log_table'):
             return
         tbl = self.alert_log_table
-        for row in range(tbl.rowCount()):
-            time_item = tbl.item(row, 0)
-            if time_item is None:
-                continue
-            data = time_item.data(Qt.ItemDataRole.UserRole)
-            if not data:
-                continue
-            sym = data.get("symbol", "")
-            entry_price = data.get("entry_price", 0)
-            if not sym or not entry_price:
-                continue
-            ws_sym = sym.replace("USDT", "") + "USDT"
-            cur_price = self._live_prices.get(ws_sym)
-            pnl_item = self._make_pnl_item(entry_price, cur_price)
-            tbl.setItem(row, 5, pnl_item)
+        tbl.setUpdatesEnabled(False)
+        try:
+            for row in range(tbl.rowCount()):
+                time_item = tbl.item(row, 0)
+                if time_item is None:
+                    continue
+                data = time_item.data(Qt.ItemDataRole.UserRole)
+                if not data:
+                    continue
+                sym = data.get("symbol", "")
+                entry_price = data.get("entry_price", 0)
+                if not sym or not entry_price:
+                    continue
+                ws_sym = sym.replace("USDT", "") + "USDT"
+                cur_price = self._live_prices.get(ws_sym)
+                new_item = self._make_pnl_item(entry_price, cur_price)
+                new_text = new_item.text()
+                existing = tbl.item(row, 5)
+                if existing and existing.text() == new_text:
+                    continue  # skip if value unchanged — avoids needless repaints
+                tbl.setItem(row, 5, new_item)
+        finally:
+            tbl.setUpdatesEnabled(True)
         self._refresh_alert_pnl_summary()
 
     def _refresh_alert_pnl_summary(self):
-        """Recompute and display Total Profit / Total Loss / Net from all visible alert rows."""
+        """Recompute and display Total Profit / Total Loss / Net from all visible alert rows.
+        Throttled — only recalculates if not already scheduled."""
+        if getattr(self, "_pnl_refresh_pending", False):
+            return
+        self._pnl_refresh_pending = True
+        QTimer.singleShot(2000, self._do_refresh_alert_pnl_summary)
+
+    def _do_refresh_alert_pnl_summary(self):
+        self._pnl_refresh_pending = False
         if not hasattr(self, 'alert_log_table') or not hasattr(self, '_al_profit_lbl'):
             return
         tbl = self.alert_log_table
@@ -2820,15 +3121,14 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
             pnl_item = tbl.item(row, 5)
             if pnl_item is None:
                 continue
-            txt = pnl_item.text()   # e.g. "$0.19970  +0.55%"
-            # Extract the trailing % value
+            txt = pnl_item.text()
             try:
-                pct_part = txt.split()[-1]          # "+0.55%" or "-3.80%"
+                pct_part = txt.split()[-1]
                 pct = float(pct_part.replace("%", ""))
                 if pct > 0:
                     total_profit += pct
                 elif pct < 0:
-                    total_loss   += pct             # negative number
+                    total_loss   += pct
             except Exception:
                 continue
         net = total_profit + total_loss
@@ -2845,6 +3145,7 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
 
         sig = alert["signal"]
         sym = alert["symbol"]
+        self._alert_symbols.add(sym)
 
         # Subscribe symbol to WS so live P&L updates flow in
         if self._ws_feed:
@@ -2862,6 +3163,10 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         self._save_alerts()
 
     def _on_surge_alert(self, alert):
+        # Promoted surges passed full criteria — route as proper STRONG BUY
+        if alert.get("surge_promoted"):
+            self._on_new_alert(alert)
+            return
         self._alert_log.append(alert)
         if self._ws_feed:
             ws_sym = alert.get("symbol", "").replace("USDT", "") + "USDT"
@@ -2896,30 +3201,32 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         for r in self._results:
             if r["symbol"] == symbol:
                 r["price"] = price
-        self._update_alert_pnl_for_symbol(symbol, price)
+        # Do NOT update PnL cells here — WS ticks fire hundreds of times/sec
+        # and doing O(n_rows) work per tick blocks the UI with 300+ alerts.
+        # The _alert_pnl_timer (1 s) batches all pending updates instead.
         if not getattr(self, "_ws_refresh_pending", False):
             self._ws_refresh_pending = True
             QTimer.singleShot(100, self._ws_flush)
 
     def _update_alert_pnl_for_symbol(self, ws_symbol: str, price: float):
-        """Instantly update P&L for any alert rows matching this WS symbol."""
+        """Update P&L cells for all alert rows matching this WS symbol."""
         if not hasattr(self, 'alert_log_table'):
             return
         tbl = self.alert_log_table
         for row in range(tbl.rowCount()):
-            time_item = tbl.item(row, 0)
-            if not time_item:
+            ti = tbl.item(row, 0)
+            if not ti:
                 continue
-            data = time_item.data(Qt.ItemDataRole.UserRole)
-            if not data:
+            d = ti.data(Qt.ItemDataRole.UserRole)
+            if not d:
                 continue
-            sym = data.get("symbol", "")
-            if sym.replace("USDT", "") + "USDT" != ws_symbol:
+            sym = d.get("symbol", "")
+            sym_ws = sym if sym.endswith("USDT") else sym + "USDT"
+            if sym_ws != ws_symbol:
                 continue
-            entry_price = data.get("entry_price", 0)
-            if not entry_price:
-                continue
-            tbl.setItem(row, 5, self._make_pnl_item(entry_price, price))
+            ep = d.get("entry_price", 0)
+            if ep:
+                tbl.setItem(row, 5, self._make_pnl_item(ep, price))
         self._refresh_alert_pnl_summary()
 
     def _ws_flush(self):
@@ -2936,6 +3243,8 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
     def _on_alert_scan_done(self, results):
         if self._worker is None or not self._worker.isRunning():
             self._results = results
+            self._last_scan_dt = datetime.now()
+            self._update_scan_cycle_lbl()
             self._refresh_display()
             self._populate_picks(results)
             self._check_sltp_hits(results)
@@ -2955,15 +3264,18 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
             ).start()
             QTimer.singleShot(2000, self._update_signal_log_size)
             if self._ws_feed:
-                syms = {r["symbol"] for r in results}
-                syms |= {t["symbol"] for t in self._trades if t["status"] == "OPEN"}
-                self._ws_feed.subscribe(syms)
+                # Only subscribe open-trade symbols for dedicated per-symbol streams.
+                # Scanner coins are already covered by the !miniTicker@arr stream.
+                trade_syms = {t["symbol"] for t in self._trades if t["status"] == "OPEN"}
+                self._ws_feed.subscribe(trade_syms)
                 if not self._ws_feed._running:
                     self._ws_feed.start()
             # Update _live_prices from scan results (covers alert symbols in the scan set)
             for r in results:
                 if r.get("price"):
                     self._live_prices[r["symbol"]] = r["price"]
+            # Immediately refresh alert P&L with newly populated prices
+            self._update_alert_pnl()
 
     def _remove_alert_row(self, row: int):
         """Remove a single alert row from the table and from _alert_log."""
@@ -2989,12 +3301,33 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
     def _clear_alert_log(self):
         self._alert_log.clear()
         if hasattr(self, 'alert_log_table'):
-            self.alert_log_table.setRowCount(0)
-        self._update_history_tab_badge()
+            tbl = self.alert_log_table
+            tbl.setUpdatesEnabled(False)
+            tbl.setRowCount(0)
+            tbl.setUpdatesEnabled(True)
+        if hasattr(self, '_alerts_sub_tabs'):
+            self._alerts_sub_tabs.setTabText(0, "📋  Alerts  (0)")
         if hasattr(self, 'al_history_stats'):
             self.al_history_stats.setText("No alerts yet — waiting for signals")
-        self._refresh_alert_pnl_summary()
-        self._save_alerts()
+        if hasattr(self, '_al_profit_lbl'):
+            self._al_profit_lbl.setText("—")
+            self._al_loss_lbl.setText("—")
+            self._al_net_lbl.setText("—")
+        # Save asynchronously — don't block UI
+        QTimer.singleShot(0, self._save_alerts)
+
+    def _apply_alert_signal_filter(self):
+        if not hasattr(self, 'alert_log_table') or not hasattr(self, 'al_signal_filter'):
+            return
+        tbl    = self.alert_log_table
+        choice = self.al_signal_filter.currentText()
+        for row in range(tbl.rowCount()):
+            if choice == "All Signals":
+                tbl.setRowHidden(row, False)
+            else:
+                sig_item = tbl.item(row, 2)
+                sig_text = sig_item.text() if sig_item else ""
+                tbl.setRowHidden(row, sig_text != choice)
 
     def _flash_window(self, signal):
         is_buy    = "BUY" in signal
@@ -3190,6 +3523,123 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
             self.statusBar().showMessage("Ready")
             self._status_alert_active = False
 
+    # ═══════════════════════════════════════════════════════════
+    #  MOMENTUM COLUMN — inline momentum data in alert table
+    # ═══════════════════════════════════════════════════════════
+
+    def _on_momentum_alert(self, alert):
+        """
+        Momentum detector fired for a coin moving UP with volume spike.
+        Instead of a separate tab, we update the MOMENTUM column (col 6)
+        on any matching row in the alert table fired within the last 5 min.
+        If no matching row exists, we add a new VOLUME SURGE row tagged as momentum.
+        """
+        if not hasattr(self, "alert_log_table"):
+            return
+
+        sym       = alert.get("symbol", "").replace("USDT", "")
+        vol_5m    = float(alert.get("vol_5m_x", 0))
+        chg_pct   = float(alert.get("chg_pct", 0))
+        rsi       = float(alert.get("rsi", 0))
+        now_str   = alert.get("time", "")
+
+        # Label: ⚡ 10.5× ↑ +5.1%  — gold for confluence, cyan otherwise
+        label = f"⚡ {vol_5m:.1f}×  +{chg_pct:.1f}%"
+        color = "#ffcc00"   # gold — assume confluence until we check
+
+        tbl = self.alert_log_table
+        matched = False
+
+        # Scan existing rows for same coin within last 5 minutes
+        for row in range(min(tbl.rowCount(), 100)):  # only scan recent rows
+            time_item = tbl.item(row, 0)
+            if not time_item:
+                continue
+            data = time_item.data(Qt.ItemDataRole.UserRole)
+            if not data:
+                continue
+            if data.get("symbol", "") != sym:
+                continue
+            # Found matching coin — update its MOMENTUM column
+            mom_item = QTableWidgetItem(label)
+            mom_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            mom_item.setForeground(QColor("#ffcc00"))  # gold = confluence
+            mom_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+            f = mom_item.font(); f.setBold(True); mom_item.setFont(f)
+            tbl.setItem(row, 6, mom_item)
+            # Gold highlight the whole row for confluence
+            gold_bg = QColor("#1a1500")
+            for _c in range(tbl.columnCount()):
+                _item = tbl.item(row, _c)
+                if _item:
+                    _item.setBackground(gold_bg)
+            matched = True
+            break
+
+        if not matched:
+            # No existing alert row — add as standalone VOLUME SURGE row
+            # with momentum data pre-filled in col 6
+            alert["surge"] = True
+            alert["signal"] = "VOLUME SURGE"
+            alert["pattern"] = f"5m vol {vol_5m:.1f}x  |  price +{chg_pct:.1f}%"
+            alert["vol_5m_x"] = vol_5m
+            alert["vol_24h_x"] = 1.0
+            self._alert_log.append(alert)
+            self._add_alert_row(alert, flash=True)
+            # After insert, update col 6 of new row (row 0)
+            mom_item = QTableWidgetItem(label)
+            mom_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            mom_item.setForeground(QColor("#00d4ff"))  # cyan = momentum only
+            mom_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+            f = mom_item.font(); f.setBold(True); mom_item.setFont(f)
+            tbl.setItem(0, 6, mom_item)
+            self._update_history_tab_badge()
+            self._save_alerts()
+
+        # Notifications
+        if MOMENTUM_CFG.get("sound"):
+            self._alert_engine._play_sound("STRONG BUY")
+        if MOMENTUM_CFG.get("desktop"):
+            tag = "⚡ CONFLUENCE" if matched else "MOMENTUM"
+            msg = (f"{tag}: {sym}  ${alert.get('price', 0):.5f}\n"
+                   f"5m vol {vol_5m:.1f}×  |  +{chg_pct:.1f}%  |  RSI {rsi:.0f}")
+            self._alert_engine._desktop_notify(tag, sym, msg)
+
+    def _apply_momentum_settings(self):
+        MOMENTUM_CFG["enabled"]        = self.mom_enabled.isChecked()
+        MOMENTUM_CFG["sound"]          = self.mom_sound.isChecked()
+        MOMENTUM_CFG["desktop"]        = self.mom_desktop.isChecked()
+        MOMENTUM_CFG["vol_5m_mult"]    = self.mom_vol_5m.value()
+        MOMENTUM_CFG["min_chg_pct"]    = self.mom_min_chg.value()
+        MOMENTUM_CFG["max_rsi"]        = self.mom_max_rsi.value()
+        MOMENTUM_CFG["min_vol_usdt"]   = int(self.mom_min_vol.value())
+        MOMENTUM_CFG["interval_sec"]   = int(self.mom_interval.value())
+        MOMENTUM_CFG["max_candidates"] = int(self.mom_max_cand.value())
+        MOMENTUM_CFG["cooldown_mins"]  = int(self.mom_cooldown.value())
+        s = self._settings
+        for k, v in MOMENTUM_CFG.items():
+            s.setValue(f"momentum_{k}", v)
+        self._show_status("Momentum settings applied")
+
+    def _restore_momentum_settings(self):
+        s = self._settings
+        if not hasattr(self, "mom_enabled"):
+            return
+        try:
+            self.mom_enabled.setChecked(s.value("momentum_enabled",   True,    type=bool))
+            self.mom_sound.setChecked(  s.value("momentum_sound",     True,    type=bool))
+            self.mom_desktop.setChecked(s.value("momentum_desktop",   True,    type=bool))
+            self.mom_vol_5m.setValue(   float(s.value("momentum_vol_5m_mult",  3.0)))
+            self.mom_min_chg.setValue(  float(s.value("momentum_min_chg_pct",  2.0)))
+            self.mom_max_rsi.setValue(  int(s.value("momentum_max_rsi",        85)))
+            self.mom_min_vol.setValue(  int(s.value("momentum_min_vol_usdt",   500_000)))
+            self.mom_interval.setValue( int(s.value("momentum_interval_sec",   30)))
+            self.mom_max_cand.setValue( int(s.value("momentum_max_candidates", 5)))
+            self.mom_cooldown.setValue( int(s.value("momentum_cooldown_mins",  20)))
+            self._apply_momentum_settings()
+        except Exception:
+            pass
+
     def _build_config_tab(self):
         outer = QWidget()
         outer_lay = QVBoxLayout(outer)
@@ -3241,6 +3691,22 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         self.cfg_candles = QSpinBox()
         self.cfg_candles.setRange(20, 200); self.cfg_candles.setValue(CFG["candle_limit"]); self.cfg_candles.setFixedWidth(160)
 
+        self.cfg_min_exp = QDoubleSpinBox()
+        self.cfg_min_exp.setRange(0.5, 20.0); self.cfg_min_exp.setDecimals(1)
+        self.cfg_min_exp.setSingleStep(0.5); self.cfg_min_exp.setSuffix("%")
+        self.cfg_min_exp.setValue(CFG.get("min_expected_move", 2.5))
+        self.cfg_min_exp.setFixedWidth(160)
+        self.cfg_min_exp.setToolTip(
+            "Minimum expected price move for a STRONG BUY signal to fire.\n"
+            "Calculated from BB width + ATR. Higher = fewer but stronger signals.")
+
+        self.cfg_rsi_period = QSpinBox()
+        self.cfg_rsi_period.setRange(5, 30); self.cfg_rsi_period.setFixedWidth(160)
+        self.cfg_rsi_period.setValue(CFG.get("rsi_period", 14))
+        self.cfg_rsi_period.setToolTip(
+            "RSI calculation period. Standard is 14.\n"
+            "Lower = more sensitive/noisy. Higher = smoother/slower.")
+
         self.cfg_new_listing = QCheckBox("Enable")
         self.cfg_new_listing.setChecked(CFG.get("new_listing_filter", False))
         self.cfg_new_listing.setStyleSheet(f"color:{WHITE};")
@@ -3267,6 +3733,8 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
             ("Top N coins",       self.cfg_top_n),
             ("Top Picks to show", self.cfg_picks_n),
             ("Candles to fetch",  self.cfg_candles),
+            ("Min Expected Move", self.cfg_min_exp),
+            ("RSI Period",         self.cfg_rsi_period),
             ("New Listing Filter", self.cfg_new_listing),
             ("Listed min days",   self.cfg_new_listing_min),
             ("Listed max days",   self.cfg_new_listing_max),
@@ -3352,8 +3820,12 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         self.sf_coin_check.setChecked(SAFETY_CFG["coin_trend_check"])
         self.sf_coin_check.setStyleSheet(f"color:{WHITE};")
         self.sf_coin_drop = QDoubleSpinBox()
-        self.sf_coin_drop.setRange(1, 20); self.sf_coin_drop.setValue(SAFETY_CFG["coin_drop_pct"])
+        self.sf_coin_drop.setRange(1, 90); self.sf_coin_drop.setValue(SAFETY_CFG["coin_drop_pct"])
         self.sf_coin_drop.setSuffix("% in 24h"); self.sf_coin_drop.setFixedWidth(120)
+        self.sf_coin_drop.setToolTip(
+            "Block STRONG BUY signals if the coin is down more than this % in 24h.\n"
+            "Default 30% — coins in freefall look oversold but keep dumping.\n"
+            "Example: STO was down -85% when scanner fired STRONG BUY repeatedly.")
         self.sf_coin_drop.setEnabled(SAFETY_CFG["coin_trend_check"])
         self.sf_coin_check.toggled.connect(self.sf_coin_drop.setEnabled)
 
@@ -3474,9 +3946,18 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         fs_hint = QLabel("Resize the window to test layout at any font size")
         fs_hint.setStyleSheet(f"color:{DIM}; font-size:10px;")
 
+        self.cfg_theme = QComboBox()
+        self.cfg_theme.addItems(["CYBER", "TRADER"])
+        self.cfg_theme.setFixedWidth(160)
+        self.cfg_theme.setToolTip("Color theme — CYBER (blue) or TRADER (amber)")
+        self.cfg_theme.currentTextChanged.connect(self._on_theme_changed)
+        theme_lbl = QLabel("Theme"); theme_lbl.setStyleSheet(f"color:{DIM};")
+
         ulay.addWidget(fs_lbl,             0, 0)
         ulay.addWidget(self.cfg_font_size, 0, 1, Qt.AlignmentFlag.AlignLeft)
         ulay.addWidget(fs_hint,            1, 0, 1, 2)
+        ulay.addWidget(theme_lbl,          2, 0)
+        ulay.addWidget(self.cfg_theme,     2, 1, Qt.AlignmentFlag.AlignLeft)
         grid2.addWidget(ui_grp, 1, 1)
 
         alert_grp = QGroupBox("ALERTS")
@@ -3848,6 +4329,8 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
                 f"Vol > {_vstr}  ·  {CFG['interval']}")
         CFG["picks_n"]              = self.cfg_picks_n.value()
         CFG["candle_limit"]         = self.cfg_candles.value()
+        CFG["min_expected_move"]    = self.cfg_min_exp.value()
+        CFG["rsi_period"]           = int(self.cfg_rsi_period.value())
         CFG["new_listing_filter"]   = self.cfg_new_listing.isChecked()
         CFG["new_listing_min_days"] = self.cfg_new_listing_min.value()
         CFG["new_listing_max_days"] = self.cfg_new_listing_max.value()
@@ -3861,7 +4344,8 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         new_fs = self.cfg_font_size.value()
         if new_fs != FONT_SIZE:
             FONT_SIZE = new_fs
-            QApplication.instance().setStyleSheet(make_stylesheet(FONT_SIZE))
+            QApplication.instance().setStyleSheet(
+                make_stylesheet(FONT_SIZE, _stylesheet_mod.CURRENT_THEME))
             self._settings.setValue("fontSize", FONT_SIZE)
 
         global BROWSER_PATH
@@ -3971,6 +4455,8 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         _load("maxPrice", self.cfg_max_price, float, "max_price")
         _load("minVol",   self.cfg_min_vol,   float, "min_volume_usdt")
         _load("candles",  self.cfg_candles,   int,   "candle_limit")
+        _load("min_exp",  self.cfg_min_exp,   float, "min_expected_move")
+        _load("rsi_per",  self.cfg_rsi_period, int,  "rsi_period")
         _load("newListingMinDays", self.cfg_new_listing_min, int,  "new_listing_min_days")
         _load("newListingMaxDays", self.cfg_new_listing_max, int,  "new_listing_max_days")
         try:
@@ -4104,9 +4590,26 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
             self.sg_min_vol.setValue(float(SURGE_CFG.get("min_vol_usdt", 500_000)))
             self.sg_interval.setValue(int(SURGE_CFG.get("interval_sec", 30)))
             self.sg_max_cand.setValue(int(SURGE_CFG.get("max_candidates", 10)))
+            self.sg_min_up.setValue(  float(s.value("surge_min_chg_pct",  1.0)))
+            self.sg_max_rsi.setValue( int(s.value("surge_max_rsi",       80)))
             self.sg_cooldown.setValue(int(SURGE_CFG.get("cooldown_mins", 60)))
         except Exception:
             pass
+
+        self._restore_momentum_settings()
+
+        # Restore theme (default: TRADER) — already applied early in __init__;
+        # this re-applies in case fontSize was also restored and changed the sheet.
+        saved_theme = s.value("theme")
+        if saved_theme not in ("CYBER", "TRADER"):
+            saved_theme = "TRADER"
+        _stylesheet_mod.set_theme(saved_theme)
+        _sync_theme_colors()
+        QApplication.instance().setStyleSheet(make_stylesheet(FONT_SIZE, saved_theme))
+        if hasattr(self, "cfg_theme"):
+            self.cfg_theme.blockSignals(True)
+            self.cfg_theme.setCurrentText(saved_theme)
+            self.cfg_theme.blockSignals(False)
 
         # Refresh subtitle to reflect restored CFG values
         if hasattr(self, '_subtitle_lbl'):
@@ -4116,12 +4619,19 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
                 f"Binance Spot  ·  Price < ${CFG['max_price']:.0f}  ·  "
                 f"Vol > {_vstr}  ·  {CFG['interval']}")
 
+    def _on_theme_changed(self, selected):
+        _stylesheet_mod.set_theme(selected)
+        _sync_theme_colors()
+        QApplication.instance().setStyleSheet(make_stylesheet(FONT_SIZE, selected))
+        self._settings.setValue("theme", selected)
+
     def _save_settings(self):
         s = self._settings
         s.setValue("geometry",    self.saveGeometry())
         s.setValue("windowState", self.saveState())
         s.setValue("fontSize",    FONT_SIZE)
         s.setValue("browserPath", BROWSER_PATH)
+        s.setValue("theme",       _stylesheet_mod.CURRENT_THEME)
         s.setValue("tradingApiKey",    TRADING_CFG["api_key"])
         s.setValue("tradingApiSecret", TRADING_CFG["api_secret"])
         s.setValue("tradingTestnet",   TRADING_CFG["testnet"])
@@ -4207,6 +4717,7 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
     def closeEvent(self, event):
         self._alert_engine.stop()
         self._surge_detector.stop()
+        self._momentum_detector.stop()
         self._trades_refresh_timer.stop()
         self._dot_blink_timer.stop()
         self._alert_pnl_timer.stop()
@@ -4229,11 +4740,11 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         self._dot_blink_timer.setInterval(500)
         self._dot_blink_timer.timeout.connect(self._blink_dot)
 
-        # Fallback timer: refreshes alert P&L for any symbols the WS
-        # hasn't ticked yet (e.g. very low-volume coins). WS handles
-        # live updates per-tick; this is a 10s safety net only.
+        # Timer: refreshes alert P&L column once per second.
+        # WS updates _live_prices on every tick; this batches all pending
+        # cell updates into one pass instead of one O(n_rows) scan per tick.
         self._alert_pnl_timer = QTimer()
-        self._alert_pnl_timer.setInterval(10000)
+        self._alert_pnl_timer.setInterval(1000)
         self._alert_pnl_timer.timeout.connect(self._update_alert_pnl)
         self._alert_pnl_timer.start()
 
@@ -4276,6 +4787,8 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
 
     def _on_finished(self, results):
         self._results = results
+        self._last_scan_dt = datetime.now()
+        self._update_scan_cycle_lbl()
         self._refresh_display()
         self._populate_picks(results)
         self._check_sltp_hits(results)
@@ -4335,6 +4848,9 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
                          if r.get("signal_age") and r["signal"] != "NEUTRAL" else 99999,
         16: lambda r, i: r.get("signal_conf", 0),
         17: lambda r, i: {"up": 0, "flat": 1, "down": 2}.get(r.get("trend_1h", "flat"), 1),
+        19: lambda r, i: r.get("vol_ratio", 0),
+        20: lambda r, i: 5,   # heat sort handled via UserRole set during populate
+        21: lambda r, i: r.get("blocker_text", "—"),
     }
 
     def _on_header_clicked(self, col):
@@ -4354,15 +4870,21 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
         self._refresh_display()
 
     def _update_header_arrows(self):
-        cols = ["#", "Symbol", "Price", "24h%", "RSI", "StRSI",
-                "MACD", "BB%", "Vol 24h", "Signal", "Pot%", "Exp%", "L/S", "Pattern", "Chart",
-                "AGE", "CONF", "1H"]
-        for i, base in enumerate(cols):
+        named = {
+            0: "#", 1: "Symbol", 2: "Price", 3: "24h%", 4: "RSI", 5: "StRSI",
+            6: "MACD", 7: "BB%", 8: "Vol 24h", 9: "Signal", 10: "Pot%", 11: "Exp%",
+            12: "L/S", 13: "Pattern", 14: "Chart", 15: "AGE", 16: "CONF", 17: "1H",
+            19: "VOL▲", 20: "HEAT", 21: "BLOCKER",
+        }
+        for i, base in named.items():
+            item = self.table.horizontalHeaderItem(i)
+            if item is None:
+                continue
             if i == self._sort_col:
                 arrow = " ▲" if self._sort_asc else " ▼"
-                self.table.horizontalHeaderItem(i).setText(base + arrow)
+                item.setText(base + arrow)
             else:
-                self.table.horizontalHeaderItem(i).setText(base)
+                item.setText(base)
 
 
     def _populate_table(self, results):
@@ -4374,10 +4896,20 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
     def _do_populate_table(self, results):
         self.table.setRowCount(0)
 
+        # Capture live theme colors so every row uses the current theme
+        _ss    = _stylesheet_mod
+        _WHITE = _ss.WHITE; _GREEN = _ss.GREEN; _RED   = _ss.RED
+        _YELL  = _ss.YELLOW; _DIM  = _ss.DIM;  _ACC   = _ss.ACCENT
+        _DARK2 = _ss.DARK2;  _BORD = _ss.BORDER
+        _SBG   = _ss.STRONG_BUY_BG;  _SSBG = _ss.STRONG_SELL_BG
+        _BBG   = _ss.BUY_BG;          _SELLBG = _ss.SELL_BG
+        _is_trader = (_ss.CURRENT_THEME == "TRADER")
+        _row_h = 28 if _is_trader else 38
+
         for idx, r in enumerate(results):
             row = self.table.rowCount()
             self.table.insertRow(row)
-            self.table.setRowHeight(row, 38)
+            self.table.setRowHeight(row, _row_h)
 
             sig   = r["signal"]
             chg   = r["change_24h"]
@@ -4389,19 +4921,21 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
             vol_m = r["volume_24h"] / 1_000_000
             sym   = r["symbol"].replace("USDT", "")
 
-            if   sig == "STRONG BUY":  row_bg = QColor(STRONG_BUY_BG)
-            elif sig == "STRONG SELL": row_bg = QColor(STRONG_SELL_BG)
-            elif sig == "BUY":         row_bg = QColor(BUY_BG)
-            elif sig == "SELL":        row_bg = QColor(SELL_BG)
+            if _is_trader:
+                row_bg = None  # TRADER: pure black rows, no tinting
+            elif sig == "STRONG BUY":  row_bg = QColor(_SBG)
+            elif sig == "STRONG SELL": row_bg = QColor(_SSBG)
+            elif sig == "BUY":         row_bg = QColor(_BBG)
+            elif sig == "SELL":        row_bg = QColor(_SELLBG)
             else:                      row_bg = None
 
-            def cell(text, color=WHITE, bold=False,
+            def cell(text, color=None, bold=False,
                      align=Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
-                     sort_val=None):
+                     sort_val=None, _rb=row_bg, _wh=_WHITE):
                 item = QTableWidgetItem(str(text))
-                item.setForeground(QBrush(QColor(color)))
-                if row_bg:
-                    item.setBackground(QBrush(row_bg))
+                item.setForeground(QBrush(QColor(color if color is not None else _wh)))
+                if _rb:
+                    item.setBackground(QBrush(_rb))
                 if bold:
                     f = item.font(); f.setBold(True); item.setFont(f)
                 item.setTextAlignment(align)
@@ -4417,21 +4951,49 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
                 bb_num = (r["price"] - r["bb_lower"]) / (r["bb_upper"] - r["bb_lower"]) * 100
                 bb_pos = f"{bb_num:.0f}%"
 
-            self.table.setItem(row, 0,  cell(str(idx+1), DIM, sort_val=idx))
-            self.table.setItem(row, 1,  cell(sym, ACCENT, bold=True, align=left, sort_val=sym))
-            self.table.setItem(row, 2,  cell(f"${r['price']:.5f}", WHITE, sort_val=r["price"]))
-            self.table.setItem(row, 3,  cell(f"{chg:+.1f}%", GREEN if chg >= 0 else RED, sort_val=chg))
-            self.table.setItem(row, 4,  cell(f"{rsi:.1f}", GREEN if rsi < 40 else RED if rsi > 60 else YELLOW, sort_val=rsi))
-            self.table.setItem(row, 5,  cell(f"{srsi:.1f}", GREEN if srsi < 30 else RED if srsi > 70 else YELLOW, sort_val=srsi))
-            self.table.setItem(row, 6,  cell("▲" if mh > 0 else "▼", GREEN if mh > 0 else RED, sort_val=mh))
-            self.table.setItem(row, 7,  cell(bb_pos, YELLOW, sort_val=bb_num))
-            self.table.setItem(row, 8,  cell(f"${vol_m:.1f}M", ACCENT, sort_val=r["volume_24h"]))
+            # ── Symbol history buffer (Task 2a) ──────────────────────────────
+            full_sym = r["symbol"]
+            if full_sym not in self._symbol_history:
+                self._symbol_history[full_sym] = collections.deque(maxlen=5)
+            self._symbol_history[full_sym].append({
+                "vol_ratio": r.get("vol_ratio", 0),
+                "rsi":       rsi,
+                "bb_pct":    bb_num,
+                "stoch_rsi": srsi,
+                "price":     r["price"],
+            })
+            hist = self._symbol_history[full_sym]
+
+            # ── Blocker detection (Task 2c) ───────────────────────────────────
+            def get_blocker(r):
+                _vol_r = r.get("vol_ratio", 0)
+                if rsi > ALERT_CFG.get("max_rsi", 70):
+                    return f"RSI {rsi:.0f} > {ALERT_CFG['max_rsi']}"
+                if bb_num > ALERT_CFG.get("max_bb_pct", 80):
+                    return f"BB {bb_num:.0f}% > {ALERT_CFG['max_bb_pct']}"
+                if srsi > 85:
+                    return f"StRSI {srsi:.0f} > 85"
+                if _vol_r < SURGE_CFG.get("vol_5m_mult", 2.0):
+                    return f"vol {_vol_r:.1f}x < {SURGE_CFG['vol_5m_mult']}x"
+                if r["signal"] != "STRONG BUY" and r.get("long_score", 0) >= 4:
+                    return f"score {r.get('long_score', 0)} needs 6"
+                return "—"
+
+            self.table.setItem(row, 0,  cell(str(idx+1), _DIM, sort_val=idx))
+            self.table.setItem(row, 1,  cell(sym, _ACC, bold=True, align=left, sort_val=sym))
+            self.table.setItem(row, 2,  cell(f"${r['price']:.5f}", sort_val=r["price"]))
+            self.table.setItem(row, 3,  cell(f"{chg:+.1f}%", _GREEN if chg >= 0 else _RED, sort_val=chg))
+            self.table.setItem(row, 4,  cell(f"{rsi:.1f}", _GREEN if rsi < 40 else _RED if rsi > 60 else _YELL, sort_val=rsi))
+            self.table.setItem(row, 5,  cell(f"{srsi:.1f}", _GREEN if srsi < 30 else _RED if srsi > 70 else _YELL, sort_val=srsi))
+            self.table.setItem(row, 6,  cell("▲" if mh > 0 else "▼", _GREEN if mh > 0 else _RED, sort_val=mh))
+            self.table.setItem(row, 7,  cell(bb_pos, _YELL, sort_val=bb_num))
+            self.table.setItem(row, 8,  cell(f"${vol_m:.1f}M", _ACC, sort_val=r["volume_24h"]))
 
             sig_tier = {"PRE-BREAKOUT": 0, "STRONG BUY": 1, "BUY": 2,
                         "NEUTRAL": 3, "SELL": 4, "STRONG SELL": 5}.get(sig, 3)
             sig_item = QTableWidgetItem(sig)
             sig_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            sig_c = GREEN if "BUY" in sig else RED if "SELL" in sig else DIM
+            sig_c = _GREEN if "BUY" in sig else _RED if "SELL" in sig else _DIM
             sig_item.setForeground(QBrush(QColor(sig_c)))
             if row_bg: sig_item.setBackground(QBrush(row_bg))
             f = sig_item.font(); f.setBold("STRONG" in sig); sig_item.setFont(f)
@@ -4443,19 +5005,19 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
                 sig_item.setToolTip(prefix + ctx_reason)
             self.table.setItem(row, 9, sig_item)
 
-            pot_c = GREEN if pot >= 70 else YELLOW if pot >= 40 else RED
-            exp_c = GREEN if exp >= 8  else GREEN  if exp >= 5  else YELLOW
+            pot_c = _GREEN if pot >= 70 else _YELL if pot >= 40 else _RED
+            exp_c = _GREEN if exp >= 8  else _GREEN if exp >= 5 else _YELL
             ls_val = r.get("long_score", 0) - r.get("short_score", 0)
             self.table.setItem(row, 10, cell(f"{pot}%",   pot_c, sort_val=pot))
             self.table.setItem(row, 11, cell(f"{exp:.1f}%", exp_c, sort_val=exp))
-            self.table.setItem(row, 12, cell(f"L{r.get('long_score',0)}/S{r.get('short_score',0)}", DIM, sort_val=ls_val))
-            self.table.setItem(row, 13, cell(r["pattern"], DIM, align=left, sort_val=r["pattern"]))
+            self.table.setItem(row, 12, cell(f"L{r.get('long_score',0)}/S{r.get('short_score',0)}", _DIM, sort_val=ls_val))
+            self.table.setItem(row, 13, cell(r["pattern"], _DIM, align=left, sort_val=r["pattern"]))
 
             candles = r.get("candles", [])
             if candles:
                 closes   = [c["close"] for c in candles[-20:]]
                 trend_up = closes[-1] > closes[0]
-                spark    = Sparkline(closes, GREEN if trend_up else RED)
+                spark    = Sparkline(closes, _GREEN if trend_up else _RED)
                 self.table.setCellWidget(row, 14, spark)
 
             sig_age_dt = r.get("signal_age")
@@ -4463,47 +5025,188 @@ If the file does not exist or is empty, do nothing and respond HEARTBEAT_OK.
                 age_secs = int((datetime.now() - sig_age_dt).total_seconds())
                 if age_secs < 60:
                     age_str = f"{age_secs}s"
-                    age_col = GREEN if age_secs < 30 else YELLOW
+                    age_col = _GREEN if age_secs < 30 else _YELL
                 else:
                     age_mins = age_secs // 60
                     age_str  = f"{age_mins}m"
-                    age_col  = YELLOW if age_mins < 5 else RED
+                    age_col  = _YELL if age_mins < 5 else _RED
                 age_sort = age_secs
             else:
-                age_str, age_col, age_sort = "—", DIM, 99999
+                age_str, age_col, age_sort = "—", _DIM, 99999
             self.table.setItem(row, 15, cell(age_str, age_col, sort_val=age_sort))
 
             conf = r.get("signal_conf", 0) if sig != "NEUTRAL" else 0
             if conf == 0:
-                conf_str = "—";      conf_col = DIM
+                conf_str = "—";      conf_col = _DIM
             elif conf == 1:
-                conf_str = "▮░░░░";  conf_col = YELLOW
+                conf_str = "▮░░░░";  conf_col = _YELL
             elif conf == 2:
-                conf_str = "▮▮░░░";  conf_col = YELLOW
+                conf_str = "▮▮░░░";  conf_col = _YELL
             elif conf == 3:
-                conf_str = "▮▮▮░░";  conf_col = GREEN
+                conf_str = "▮▮▮░░";  conf_col = _GREEN
             elif conf == 4:
-                conf_str = "▮▮▮▮░";  conf_col = GREEN
+                conf_str = "▮▮▮▮░";  conf_col = _GREEN
             else:
-                conf_str = "▮▮▮▮▮";  conf_col = ACCENT
+                conf_str = "▮▮▮▮▮";  conf_col = _ACC
             self.table.setItem(row, 16, cell(conf_str, conf_col, sort_val=conf))
 
             trend_1h = r.get("trend_1h", "flat")
             if trend_1h == "up":
                 t1h_str = "↑"
-                t1h_col = GREEN if "BUY" in sig else (RED if "SELL" in sig else ACCENT)
+                t1h_col = _GREEN if "BUY" in sig else (_RED if "SELL" in sig else _ACC)
                 t1h_sort = 0
             elif trend_1h == "down":
                 t1h_str = "↓"
-                t1h_col = RED if "BUY" in sig else (GREEN if "SELL" in sig else RED)
+                t1h_col = _RED if "BUY" in sig else (_GREEN if "SELL" in sig else _RED)
                 t1h_sort = 2
             else:
                 t1h_str = "→"
-                t1h_col = DIM
+                t1h_col = _DIM
                 t1h_sort = 1
             self.table.setItem(row, 17, cell(t1h_str, t1h_col,
                 align=Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignCenter,
                 sort_val=t1h_sort))
+
+            # ── Col 19: VOL▲ sparkline (Task 2d) ─────────────────────────────
+            vol_ratios = [h["vol_ratio"] for h in hist]
+            # pad left to 5 bars
+            while len(vol_ratios) < 5:
+                vol_ratios.insert(0, 0.0)
+            vol_ratios = vol_ratios[-5:]
+
+            _vol_dim = _DIM; _vol_teal = "#26a69a"; _vol_amber = "#ffa726"; _vol_red = "#e53935"
+
+            class _VolBars(QWidget):
+                def __init__(self, values, _d=_vol_dim, _t=_vol_teal, _a=_vol_amber, _r=_vol_red, parent=None):
+                    super().__init__(parent)
+                    self._vals = values
+                    self._d, self._t, self._a, self._r = _d, _t, _a, _r
+                    self.setFixedSize(50, 22)
+
+                def paintEvent(self, _event):
+                    p = QPainter(self)
+                    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+                    w, h = self.width(), self.height()
+                    mx = max((v for v in self._vals if v), default=1) or 1
+                    bw = max(1, (w - 4) // 5)
+                    for i, v in enumerate(self._vals):
+                        if v <= 0:
+                            clr = QColor(self._d); bh = 2
+                        elif v > 6:
+                            clr = QColor(self._r); bh = max(3, int(v / mx * (h - 4)))
+                        elif v > 4:
+                            clr = QColor(self._a); bh = max(3, int(v / mx * (h - 4)))
+                        elif v > 2:
+                            clr = QColor(self._t); bh = max(3, int(v / mx * (h - 4)))
+                        else:
+                            clr = QColor(self._d); bh = max(2, int(v / mx * (h - 4)))
+                        x = 2 + i * bw
+                        p.setBrush(QBrush(clr))
+                        p.setPen(Qt.PenStyle.NoPen)
+                        p.drawRect(x, h - bh - 1, bw - 1, bh)
+
+            vol_bar_w = _VolBars(vol_ratios)
+            self.table.setCellWidget(row, 19, vol_bar_w)
+
+            # ── Col 20: HEAT status pill badge (Task 2e) ─────────────────────
+            vol_ratio = r.get("vol_ratio", 0)
+            long_score = r.get("long_score", 0)
+            hist_vols = [h["vol_ratio"] for h in hist]
+
+            # Badge style constants (muted palette matching preview)
+            _BADGE = {
+                "ALERTED":    ("ALERTED",    "#1a3a1a", "#66bb6a", "1px solid #2d5a2d"),
+                "SUPPRESSED": ("SUPPRESSED", "#3a1a1a", "#ef5350", "1px solid #5a2d2d"),
+                "BUILDING":   ("BUILDING",   "#2d2000", "#ffa726", "1px solid #4a3800"),
+                "WATCH":      ("WATCH",      "transparent", "#42a5f5", "1px solid #1565c0"),
+                "COOLING":    ("COOLING",    "#252525", "#757575", "1px solid #333333"),
+                "—":          ("—",          "transparent", _DIM,    "none"),
+            }
+
+            if r.get("alert_fired") or full_sym in self._alert_symbols:
+                heat_key = "ALERTED"; heat_sort = 0
+            elif vol_ratio >= 2.5 and long_score >= 4 and sig != "STRONG BUY":
+                heat_key = "SUPPRESSED"; heat_sort = 1
+            elif (len(hist_vols) >= 3
+                  and hist_vols[-1] > hist_vols[-2] > hist_vols[-3]
+                  and vol_ratio >= 1.8):
+                heat_key = "BUILDING"; heat_sort = 2
+            elif vol_ratio >= 1.5 and rsi < ALERT_CFG.get("max_rsi", 70):
+                heat_key = "WATCH"; heat_sort = 3
+            elif (len(hist_vols) >= 2
+                  and max(hist_vols[:-1], default=0) >= 2.0
+                  and vol_ratio < hist_vols[-2]):
+                heat_key = "COOLING"; heat_sort = 4
+            else:
+                heat_key = "—"; heat_sort = 5
+
+            _blabel, _bbg, _bfg, _bborder = _BADGE[heat_key]
+            # Pill badge floats inside a black cell — setCellWidget with QLabel
+            _heat_placeholder = QTableWidgetItem("")
+            _heat_placeholder.setData(Qt.ItemDataRole.UserRole, heat_sort)
+            self.table.setItem(row, 20, _heat_placeholder)
+            if heat_key != "—":
+                _pill = QLabel(_blabel)
+                _pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                _pill.setStyleSheet(
+                    f"background:{_bbg}; color:{_bfg}; "
+                    f"border-radius:4px; font-weight:700; "
+                    f"font-family:'JetBrains Mono','DejaVu Sans Mono',monospace; "
+                    f"font-size:{max(FONT_SIZE-2,10)}px; padding:2px 6px;")
+                _pill_w = QWidget()
+                _pill_w.setStyleSheet("background:transparent;")
+                _pill_w.setAutoFillBackground(False)
+                _pl = QHBoxLayout(_pill_w)
+                _pl.setContentsMargins(3, 2, 3, 2)
+                _pl.addWidget(_pill)
+                self.table.setCellWidget(row, 20, _pill_w)
+
+            # For SUPPRESSED in TRADER: very subtle red row tint
+            if heat_key == "SUPPRESSED" and not _is_trader:
+                _sup_bg = QColor("#180808")
+                for c_idx in range(self.table.columnCount()):
+                    _it = self.table.item(row, c_idx)
+                    if _it and c_idx not in (19, 20):
+                        _it.setBackground(QBrush(_sup_bg))
+
+            # ── Col 21: BLOCKER (Task 2f) ─────────────────────────────────────
+            blocker = get_blocker(r)
+            blk_item = QTableWidgetItem(blocker)
+            blk_item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+            _gate_pill_bg = "#3a1a00"
+            _gate_pill_fg = "#cc7700"
+            if blocker != "—":
+                blk_item.setForeground(QBrush(QColor(_gate_pill_fg)))
+
+                def _make_pill_widget(val_text, bg, fg):
+                    _lbl = QLabel(val_text)
+                    _lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    _lbl.setStyleSheet(
+                        f"background:{bg}; color:{fg}; border-radius:4px; "
+                        f"font-weight:700; padding:2px 6px; "
+                        f"font-family:'JetBrains Mono','DejaVu Sans Mono',monospace; "
+                        f"font-size:{max(FONT_SIZE-2,10)}px;")
+                    _w = QWidget()
+                    _w.setStyleSheet("background:transparent;")
+                    _w.setAutoFillBackground(False)
+                    _lay = QHBoxLayout(_w)
+                    _lay.setContentsMargins(3, 2, 3, 2)
+                    _lay.addWidget(_lbl)
+                    return _w
+
+                if "RSI" in blocker and "StRSI" not in blocker:
+                    self.table.setCellWidget(row, 4,
+                        _make_pill_widget(f"{rsi:.1f}", _gate_pill_bg, _gate_pill_fg))
+                elif "BB" in blocker:
+                    self.table.setCellWidget(row, 7,
+                        _make_pill_widget(bb_pos, _gate_pill_bg, _gate_pill_fg))
+                elif "StRSI" in blocker:
+                    self.table.setCellWidget(row, 5,
+                        _make_pill_widget(f"{srsi:.1f}", _gate_pill_bg, _gate_pill_fg))
+            else:
+                blk_item.setForeground(QBrush(QColor(_DIM)))
+            blk_item.setData(Qt.ItemDataRole.UserRole, blocker)
+            self.table.setItem(row, 21, blk_item)
 
         if self._sort_col is not None:
             self._update_header_arrows()

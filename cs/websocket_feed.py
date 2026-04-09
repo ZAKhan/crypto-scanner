@@ -53,7 +53,7 @@ class BinanceWebSocketPrices(QObject):
         streams = []
         for sym in sorted(self._trade_syms):
             streams.append(f"{sym.lower()}@miniTicker")
-        streams.append("!miniTicker@arr@1000ms")   # 1 s cadence — sufficient for alert P&L
+        streams.append("!miniTicker@arr")   # all-market snapshot every ~1s
 
         return base + "/".join(streams)
 

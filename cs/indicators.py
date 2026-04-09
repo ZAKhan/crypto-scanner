@@ -218,9 +218,9 @@ def score_signal(rsi, macd_h, price, bb_upper, bb_lower, bb_mid, pattern,
 
     # ── 1h trend alignment ──────────────────────────────
     if trend_1h == "up":
-        long_score  += 1
+        long_score  += 2
     elif trend_1h == "down":
-        long_score  -= 2
+        long_score  = 0   # HARD ZERO — 1h downtrend blocks all long scoring
         short_score += 1
 
     long_score  = max(0, long_score)
@@ -228,55 +228,74 @@ def score_signal(rsi, macd_h, price, bb_upper, bb_lower, bb_mid, pattern,
     margin = abs(long_score - short_score)
 
     if long_score > short_score:
-        if   long_score >= 6 and margin >= 3: return "STRONG BUY",  "green",  long_score, short_score
-        elif long_score >= 3 and margin >= 2: return "BUY",          "green",  long_score, short_score
+        if   long_score >= 8 and margin >= 4: return "STRONG BUY",  "green",  long_score, short_score
+        elif long_score >= 5 and margin >= 3: return "BUY",          "green",  long_score, short_score
         else:                                  return "NEUTRAL",      "yellow", long_score, short_score
     elif short_score > long_score:
-        if   short_score >= 6 and margin >= 3: return "STRONG SELL", "red",    long_score, short_score
-        elif short_score >= 3 and margin >= 2: return "SELL",         "red",    long_score, short_score
+        if   short_score >= 8 and margin >= 4: return "STRONG SELL", "red",    long_score, short_score
+        elif short_score >= 5 and margin >= 3: return "SELL",         "red",    long_score, short_score
         else:                                   return "NEUTRAL",     "yellow", long_score, short_score
     else:
         return "NEUTRAL", "yellow", long_score, short_score
 
 
 def profit_potential(r):
+    """
+    Setup quality score 0–100. Measures how good the setup is,
+    independent of signal strength. Minimum to alert: 50.
+    """
     score = 0
-    sig = r["signal"]
-    if "STRONG" in sig:                         score += 30
-    elif "BUY" in sig or "SELL" in sig:         score += 15
 
-    vr = r.get("vol_ratio", 1)
-    if vr > 3:    score += 25
-    elif vr > 2:  score += 18
-    elif vr > 1.5:score += 12
-    elif vr > 1:  score += 6
-
+    # BB room to move — price near lower band = room to run upward
     bbu, bbl = r.get("bb_upper"), r.get("bb_lower")
     price = r["price"]
-    if bbu and bbl and bbu != bbl:
+    if bbu and bbl and (bbu - bbl) > 0:
         pos = (price - bbl) / (bbu - bbl)
-        if "BUY" in sig: score += int((1 - pos) * 20)
-        else:            score += int(pos * 20)
+        if pos < 0.20:   score += 20
+        elif pos < 0.35: score += 12
+        elif pos < 0.50: score += 5
 
-    rsi = r["rsi"]
-    if "BUY" in sig:
-        if rsi < 25:   score += 15
-        elif rsi < 35: score += 10
-        elif rsi < 45: score += 5
-    else:
-        if rsi > 75:   score += 15
-        elif rsi > 65: score += 10
-        elif rsi > 55: score += 5
+    # Volume conviction
+    vr = r.get("vol_ratio", 1.0)
+    if vr > 3.0:    score += 20
+    elif vr > 2.0:  score += 14
+    elif vr > 1.5:  score += 8
+    elif vr > 1.2:  score += 3
+    elif vr < 1.0:  score -= 10
 
-    mh = r.get("macd_hist", 0)
-    if ("BUY" in sig and mh > 0) or ("SELL" in sig and mh < 0):
-        score += 10
-
+    # StochRSI momentum — deeply oversold in local RSI range
     srsi = r.get("stoch_rsi", 50)
-    if "BUY" in sig and srsi < 20:    score += 10
-    elif "SELL" in sig and srsi > 80: score += 10
+    if srsi < 15:    score += 15
+    elif srsi < 30:  score += 8
+    elif srsi < 50:  score += 3
+    elif srsi > 70:  score -= 8
 
-    return min(score, 100)
+    # Pattern quality
+    pattern = r.get("pattern", "")
+    if "Hammer" in pattern or "Bullish Engulf" in pattern:
+        score += 15
+    elif "Vol Spike ↑" in pattern:
+        score += 10
+    elif "Uptrend" in pattern:
+        score += 8
+    elif "Squeeze" in pattern:
+        score += 5
+    elif pattern == "Neutral":
+        score -= 5
+
+    # ADR quality — coin must have real daily range to give a 3–5% move
+    adr = r.get("adr_pct", 0)
+    if adr > 3.0:    score += 10
+    elif adr > 2.0:  score += 6
+    elif adr > 1.5:  score += 3
+    elif adr < 0.8:  score -= 10
+
+    # BB squeeze bonus — tight coil = potential energy
+    bb_width = r.get("bb_width_pct", 99)
+    if bb_width < 2.0:   score += 10
+    elif bb_width < 3.5: score += 5
+
+    return max(0, min(score, 100))
 
 
 def calc_expected_move(candles, signal):
@@ -323,16 +342,21 @@ def analyse(symbol, raw_klines, change_24h=0.0, trend_1h="flat"):
     stoch_rsi        = calc_stoch_rsi(closes, CFG["rsi_period"])
     macd, msig, mh, macd_hist_series = calc_macd(closes)
     bbu, bbm, bbl    = calc_bollinger(closes)
-    pattern          = detect_pattern(candles)
-    avg_vol          = statistics.mean(vols)
+    # Pattern on closed candles only — never the live (incomplete) candle
+    pattern          = detect_pattern(candles[:-1])
+    # avg_vol excludes the current (live/incomplete) candle per spec
+    avg_vol          = statistics.mean(vols[:-1]) if len(vols) > 1 else vols[0]
     vol_ratio        = vols[-1] / avg_vol if avg_vol else 0
 
     macd_rising = (len(macd_hist_series) >= 2 and
                    macd_hist_series[-1] > macd_hist_series[-2])
 
     bb_width_pct = 0.0
+    bb_pos       = 0.0
     if bbu and bbl and closes[-1] > 0:
         bb_width_pct = (bbu - bbl) / closes[-1] * 100
+        if (bbu - bbl) > 0:
+            bb_pos = round((closes[-1] - bbl) / (bbu - bbl) * 100, 1)
 
     adr_pct = 0.0
     if len(candles) >= 5 and closes[-1] > 0:
@@ -369,11 +393,15 @@ def analyse(symbol, raw_klines, change_24h=0.0, trend_1h="flat"):
         # RSI up gradually as buyers absorb supply before the breakout candle
         rsi_ceiling    = 60 if tight_squeeze else 55
 
+        # For tight squeezes, vol_ratio is intentionally NOT required —
+        # accumulation by definition happens on low volume before the breakout.
+        # AEVO-type setups: flat price, near-zero volume, BB squeezing → fire early.
+        # For normal BB width, still require vol_ratio to confirm real interest.
         pre_breakout = (
             1.5 <= bb_width_pct < 5.0 and
-            vol_ratio >= vol_threshold and
+            (tight_squeeze or vol_ratio >= vol_threshold) and
             35 <= rsi <= rsi_ceiling and
-            bb_pct_pos < 30 and          # slight widening: 25→30 to catch mid-range coils
+            bb_pct_pos < 30 and
             not at_resistance and
             (not tight_squeeze or higher_lows or trend_1h in ("up", "flat"))
         )
@@ -393,6 +421,7 @@ def analyse(symbol, raw_klines, change_24h=0.0, trend_1h="flat"):
         "bb_mid":       bbm,
         "bb_lower":     bbl,
         "bb_width_pct": round(bb_width_pct, 2),
+        "bb_pos":       bb_pos,
         "support":      round(min(lows[-15:]), 6),
         "resist":       round(max(highs[-15:]), 6),
         "avg_vol":      avg_vol,

@@ -1,21 +1,38 @@
 from PyQt6.QtGui import QFont
 
 # ─────────────────────────────────────────────────────────────
-DARK  = "#0a0e1a"
-DARK2 = "#0f1525"
-PANEL = "#131929"
-CARD  = "#1a2235"
-BORDER= "#1e2d47"
-ACCENT= "#00d4ff"
-GREEN = "#00ff88"
-RED   = "#ff3366"
-YELLOW= "#ffcc00"
-WHITE = "#e8f0fe"
-DIM   = "#4a5568"
-STRONG_BUY_BG  = "#002a1a"
-STRONG_SELL_BG = "#2a0010"
-BUY_BG         = "#001a10"
-SELL_BG        = "#1a000a"
+DARK  = "#0a0a0a"
+DARK2 = "#0a0a0a"
+PANEL = "#0a0a0a"
+CARD  = "#0f0f0f"
+BORDER= "#2a2a2a"
+ACCENT= "#f0c040"
+GREEN = "#4caf50"
+RED   = "#e53935"
+YELLOW= "#ffa726"
+WHITE = "#cccccc"
+DIM   = "#555555"
+STRONG_BUY_BG  = "#0a0f0a"
+STRONG_SELL_BG = "#0f0a0a"
+BUY_BG         = "#0a0a0a"
+SELL_BG        = "#0a0a0a"
+
+CURRENT_THEME = "TRADER"
+
+_THEMES = {
+    "CYBER": {
+        "DARK":  "#0a0e1a", "DARK2": "#0f1525", "PANEL": "#131929", "CARD":  "#1a2235",
+        "BORDER": "#1e2d47", "ACCENT": "#00d4ff",
+        "GREEN": "#00ff88", "RED": "#ff3366", "YELLOW": "#ffcc00", "WHITE": "#e8f0fe", "DIM": "#4a5568",
+        "STRONG_BUY_BG": "#002a1a", "STRONG_SELL_BG": "#2a0010", "BUY_BG": "#001a10", "SELL_BG": "#1a000a",
+    },
+    "TRADER": {
+        "DARK":  "#0a0a0a", "DARK2": "#0a0a0a", "PANEL": "#0a0a0a", "CARD":  "#0f0f0f",
+        "BORDER": "#2a2a2a", "ACCENT": "#f0c040",
+        "GREEN": "#4caf50", "RED": "#e53935", "YELLOW": "#ffa726", "WHITE": "#cccccc", "DIM": "#555555",
+        "STRONG_BUY_BG": "#0a0f0a", "STRONG_SELL_BG": "#0f0a0a", "BUY_BG": "#0a0a0a", "SELL_BG": "#0a0a0a",
+    },
+}
 
 # ── Cross-platform monospace font stack ──────────────────────────────────────
 # Arch Linux built-in:  DejaVu Sans Mono, Liberation Mono
@@ -68,13 +85,326 @@ SANS  = "Inter,Segoe UI,SF Pro Display,sans-serif"
 FONT_SIZE    = 13   # default — user can change in Config tab
 BROWSER_PATH = ""   # empty = use system default; set via Config tab
 
-def make_stylesheet(fs=13):
-    """Generate the full app stylesheet at a given base font size."""
-    fs0  = fs        # base
-    fs_s = fs - 1    # small (labels, headers)
-    fs_x = fs - 2    # extra small (hints, status)
-    fs_l = fs + 1    # large (buttons, titles)
-    fs_h = fs + 5    # heading (symbol name in detail)
+def make_stylesheet(fs=13, theme="CYBER"):
+    """Generate the full app stylesheet at a given base font size and theme.
+
+    TRADER theme returns a completely independent stylesheet — nothing is
+    inherited from the CYBER palette.
+    """
+    if theme == "TRADER":
+        return _make_trader_stylesheet(fs)
+    return _make_cyber_stylesheet(fs)
+
+
+# ── TRADER stylesheet ────────────────────────────────────────────────────────
+
+def _make_trader_stylesheet(fs=13):
+    """Pure-black terminal aesthetic — monospace everywhere, amber accent only."""
+    fs   = max(fs - 1, 9)
+    fs_s = fs - 1
+    fs_x = fs - 2
+    fs_l = fs + 1
+    fs_h = fs + 4
+    M    = MONO_CSS     # alias
+    return f"""
+QMainWindow, QWidget {{
+    background-color: #0a0a0a;
+    color: #cccccc;
+    font-family: {M};
+    font-size: {fs}px;
+}}
+
+QTabWidget::pane {{
+    border: 1px solid #1e1e1e;
+    background: #0a0a0a;
+    border-radius: 0px;
+}}
+QTabBar::tab {{
+    background: #0a0a0a;
+    color: #555555;
+    padding: 6px 16px;
+    border: 1px solid #1e1e1e;
+    border-bottom: none;
+    font-family: {M};
+    font-weight: 500;
+    font-size: {fs_s}px;
+}}
+QTabBar::tab:selected {{
+    background: #0a0a0a;
+    color: #f0c040;
+    border-bottom: 2px solid #f0c040;
+}}
+QTabBar::tab:hover:!selected {{
+    color: #888888;
+    background: #0f0f0f;
+}}
+
+QTableWidget {{
+    background-color: #0a0a0a;
+    gridline-color: #1a1a1a;
+    border: 1px solid #1e1e1e;
+    border-radius: 0px;
+    font-family: {M};
+    font-size: {fs_s}px;
+    selection-background-color: #111111;
+    selection-color: #cccccc;
+    outline: none;
+}}
+QTableWidget::item {{
+    padding: 4px 8px;
+    border-bottom: 1px solid #141414;
+}}
+QTableWidget::item:hover {{
+    background-color: #111111;
+}}
+QHeaderView::section {{
+    background-color: #0a0a0a;
+    color: #555555;
+    padding: 4px 8px;
+    border: none;
+    border-right: 1px solid #1a1a1a;
+    border-bottom: 1px solid #2a2a2a;
+    font-family: {M};
+    font-size: 10px;
+    font-weight: 500;
+}}
+QHeaderView::section:hover {{
+    background-color: #0f0f0f;
+    color: #888888;
+}}
+
+QPushButton {{
+    background-color: #0a0a0a;
+    color: #888888;
+    border: 1px solid #2a2a2a;
+    border-radius: 3px;
+    padding: 6px 16px;
+    font-family: {M};
+    font-size: {fs}px;
+}}
+QPushButton:hover {{
+    border-color: #f0c040;
+    color: #f0c040;
+}}
+QPushButton:pressed {{
+    background-color: #f0c040;
+    color: #0a0a0a;
+}}
+QPushButton#scanBtn {{
+    background: #0a0a0a;
+    color: #f0c040;
+    border: 1px solid #f0c040;
+    padding: 4px 8px;
+    font-family: {M};
+    font-size: {fs_l}px;
+    font-weight: 700;
+    border-radius: 3px;
+    min-width: 0px;
+}}
+QPushButton#scanBtn:hover {{
+    background: #f0c040;
+    color: #0a0a0a;
+}}
+QPushButton#scanBtn:disabled {{
+    background: #0a0a0a;
+    color: #333333;
+    border-color: #2a2a2a;
+}}
+
+QProgressBar {{
+    background: #0f0f0f;
+    border: 1px solid #2a2a2a;
+    border-radius: 2px;
+    height: 4px;
+    color: transparent;
+}}
+QProgressBar::chunk {{
+    background: #f0c040;
+    border-radius: 1px;
+}}
+
+QLabel#statusLabel {{
+    color: #444444;
+    font-family: {M};
+    font-size: {fs_x}px;
+    padding: 2px 8px;
+}}
+QLabel#titleLabel {{
+    color: #f0c040;
+    font-family: {M};
+    font-size: {fs_h}px;
+    font-weight: 700;
+}}
+QLabel#subtitleLabel {{
+    color: #555555;
+    font-family: {M};
+    font-size: {fs_x}px;
+}}
+QLabel#versionLabel {{
+    color: #0a0a0a;
+    background: #f0c040;
+    font-family: {M};
+    font-size: {fs_x}px;
+    font-weight: 700;
+    border-radius: 2px;
+    padding: 1px 6px;
+}}
+
+QFrame#cardFrame {{
+    background: #0f0f0f;
+    border: 1px solid #2a2a2a;
+    border-radius: 3px;
+    padding: 8px;
+}}
+QFrame#accentCard {{
+    background: #0f0f0f;
+    border: 1px solid #2a2a2a;
+    border-left: 2px solid #f0c040;
+    border-radius: 3px;
+    padding: 8px;
+}}
+
+QGroupBox {{
+    color: #f0c040;
+    border: 1px solid #2a2a2a;
+    border-radius: 3px;
+    margin-top: 14px;
+    font-family: {M};
+    font-weight: 600;
+    font-size: {fs_x}px;
+}}
+QGroupBox::title {{
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    padding: 0 6px;
+    left: 8px;
+}}
+
+QDoubleSpinBox, QSpinBox, QComboBox, QLineEdit, QTextEdit {{
+    background: #0f0f0f;
+    color: #cccccc;
+    border: 1px solid #2a2a2a;
+    border-radius: 2px;
+    padding: 4px 8px;
+    font-family: {M};
+    font-size: {fs_s}px;
+    min-width: 80px;
+}}
+QDoubleSpinBox:focus, QSpinBox:focus, QComboBox:focus, QLineEdit:focus {{
+    border-color: #f0c040;
+}}
+QComboBox::drop-down {{
+    border: none;
+    padding-right: 6px;
+}}
+QComboBox QAbstractItemView {{
+    background: #0f0f0f;
+    color: #cccccc;
+    border: 1px solid #2a2a2a;
+    selection-background-color: #1a1a1a;
+}}
+
+QScrollBar:vertical {{
+    background: #0a0a0a;
+    width: 6px;
+    border-radius: 3px;
+}}
+QScrollBar::handle:vertical {{
+    background: #1e1e1e;
+    border-radius: 3px;
+    min-height: 24px;
+}}
+QScrollBar::handle:vertical:hover {{
+    background: #2a2a2a;
+}}
+QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
+QScrollBar:horizontal {{
+    background: #0a0a0a;
+    height: 6px;
+    border-radius: 3px;
+}}
+QScrollBar::handle:horizontal {{
+    background: #1e1e1e;
+    border-radius: 3px;
+    min-width: 24px;
+}}
+QScrollBar::handle:horizontal:hover {{
+    background: #2a2a2a;
+}}
+
+QCheckBox {{
+    color: #888888;
+    font-family: {M};
+    font-size: {fs_s}px;
+    spacing: 6px;
+}}
+QCheckBox::indicator {{
+    width: 14px;
+    height: 14px;
+    border: 1px solid #2a2a2a;
+    border-radius: 2px;
+    background: #0f0f0f;
+}}
+QCheckBox::indicator:hover {{
+    border-color: #f0c040;
+}}
+QCheckBox::indicator:checked {{
+    background: #f0c040;
+    border-color: #f0c040;
+    image: none;
+}}
+QCheckBox:disabled {{
+    color: #333333;
+}}
+QCheckBox::indicator:disabled {{
+    border-color: #222222;
+    background: #0a0a0a;
+}}
+
+QStatusBar {{
+    background: #0a0a0a;
+    color: #444444;
+    border-top: 1px solid #1a1a1a;
+    font-family: {M};
+    font-size: {fs_x}px;
+}}
+
+QMenu {{
+    background: #0f0f0f;
+    color: #cccccc;
+    border: 1px solid #2a2a2a;
+    font-family: {M};
+}}
+QMenu::item:selected {{
+    background: #1a1a1a;
+    color: #f0c040;
+}}
+
+QToolTip {{
+    background: #0f0f0f;
+    color: #cccccc;
+    border: 1px solid #2a2a2a;
+    font-family: {M};
+    font-size: {fs_x}px;
+}}
+"""
+
+
+# ── CYBER stylesheet ─────────────────────────────────────────────────────────
+
+def _make_cyber_stylesheet(fs=13):
+    """Original blue neon aesthetic."""
+    c      = _THEMES["CYBER"]
+    DARK   = c["DARK"];  DARK2 = c["DARK2"]; PANEL = c["PANEL"]; CARD = c["CARD"]
+    BORDER = c["BORDER"]; ACCENT = c["ACCENT"]
+    GREEN  = c["GREEN"]; RED = c["RED"]; YELLOW = c["YELLOW"]
+    WHITE  = c["WHITE"]; DIM = c["DIM"]
+
+    fs0  = fs
+    fs_s = fs - 1
+    fs_x = fs - 2
+    fs_l = fs + 1
+    fs_h = fs + 5
     return f"""
 QMainWindow, QWidget {{
     background-color: {DARK};
@@ -337,3 +667,19 @@ QStatusBar {{
 """
 
 STYLESHEET = make_stylesheet(FONT_SIZE)
+
+
+def set_theme(name):
+    """Update all module-level color constants to the named theme and regenerate STYLESHEET."""
+    global CURRENT_THEME, DARK, DARK2, PANEL, CARD, BORDER, ACCENT, GREEN, RED, YELLOW, WHITE, DIM
+    global STRONG_BUY_BG, STRONG_SELL_BG, BUY_BG, SELL_BG, STYLESHEET
+    if name not in _THEMES:
+        return
+    c              = _THEMES[name]
+    CURRENT_THEME  = name
+    DARK           = c["DARK"];   DARK2  = c["DARK2"];  PANEL  = c["PANEL"];  CARD   = c["CARD"]
+    BORDER         = c["BORDER"]; ACCENT = c["ACCENT"]
+    GREEN          = c["GREEN"];  RED    = c["RED"];     YELLOW = c["YELLOW"]; WHITE  = c["WHITE"]; DIM = c["DIM"]
+    STRONG_BUY_BG  = c["STRONG_BUY_BG"];  STRONG_SELL_BG = c["STRONG_SELL_BG"]
+    BUY_BG         = c["BUY_BG"];         SELL_BG        = c["SELL_BG"]
+    STYLESHEET     = make_stylesheet(FONT_SIZE, name)
